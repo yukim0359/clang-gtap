@@ -1,0 +1,24 @@
+// This file is made by maeda under gpu-task-parallelism project based on llvm-project.
+// Referencing to clang/include/clang/Basic/OpenMPKinds.def
+
+#ifndef GTAP_DIRECTIVE
+#define GTAP_DIRECTIVE(Name)
+#endif
+
+#ifndef GTAP_CLAUSE
+#define GTAP_CLAUSE(Name)
+#endif
+
+// Directives
+GTAP_DIRECTIVE(task)
+GTAP_DIRECTIVE(taskwait)
+GTAP_DIRECTIVE(init)
+GTAP_DIRECTIVE(entry)
+GTAP_DIRECTIVE(function)
+
+// Clauses
+GTAP_CLAUSE(shared)
+GTAP_CLAUSE(kind)
+
+#undef GTAP_DIRECTIVE
+#undef GTAP_CLAUSE

@@ -77,6 +77,7 @@ add_clang_library(clangSema
   SemaOpenACCClause.cpp
   SemaOpenACCClauseAppertainment.cpp
   SemaOpenCL.cpp
+  SemaGTaP.cpp
   SemaOpenMP.cpp
   SemaOverload.cpp
   SemaPPC.cpp

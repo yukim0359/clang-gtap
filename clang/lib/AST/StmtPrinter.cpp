@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- StmtPrinter.cpp - Printing implementation for Stmt ASTs ------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -881,6 +883,29 @@ void StmtPrinter::VisitOMPBarrierDirective(OMPBarrierDirective *Node) {
 void StmtPrinter::VisitOMPTaskwaitDirective(OMPTaskwaitDirective *Node) {
   Indent() << "#pragma omp taskwait";
   PrintOMPExecutableDirective(Node);
+}
+
+// GTaP Directives
+void StmtPrinter::VisitGTaPTaskDirective(GTaPTaskDirective *Node) {
+  Indent() << "#pragma gtap task";
+  OS << "\n";
+  if (Node->hasAssociatedStmt())
+    PrintStmt(Node->getAssociatedStmt());
+}
+
+void StmtPrinter::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *Node) {
+  Indent() << "#pragma gtap taskwait";
+  OS << "\n";
+}
+
+void StmtPrinter::VisitGTaPInitDirective(GTaPInitDirective *Node) {
+  Indent() << "#pragma gtap init";
+  OS << "\n";
+}
+
+void StmtPrinter::VisitGTaPEntryDirective(GTaPEntryDirective *Node) {
+  Indent() << "#pragma gtap entry";
+  OS << "\n";
 }
 
 void StmtPrinter::VisitOMPAssumeDirective(OMPAssumeDirective *Node) {

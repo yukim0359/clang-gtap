@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- Stmt.cpp - Statement AST Node Implementation -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -25,6 +27,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtSYCL.h"
 #include "clang/AST/Type.h"
 #include "clang/Basic/CharInfo.h"

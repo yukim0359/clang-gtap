@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 include "clang/Basic/ASTNode.td"
 
 class StmtNode<StmtNode base, bit abstract = 0> : ASTNode, AttrSubject {
@@ -301,6 +303,13 @@ def OMPParallelGenericLoopDirective : StmtNode<OMPLoopDirective>;
 def OMPTargetParallelGenericLoopDirective : StmtNode<OMPLoopDirective>;
 def OMPAssumeDirective : StmtNode<OMPExecutableDirective>;
 def OMPErrorDirective : StmtNode<OMPExecutableDirective>;
+
+// GTaP Directives.
+def GTaPExecutableDirective : StmtNode<Stmt, 1>;
+def GTaPTaskDirective : StmtNode<GTaPExecutableDirective>;
+def GTaPTaskwaitDirective : StmtNode<GTaPExecutableDirective>;
+def GTaPInitDirective : StmtNode<GTaPExecutableDirective>;
+def GTaPEntryDirective : StmtNode<GTaPExecutableDirective>;
 
 // OpenACC Constructs.
 def OpenACCConstructStmt : StmtNode<Stmt, /*abstract=*/1>;

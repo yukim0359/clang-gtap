@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- SemaDecl.cpp - Semantic Analysis for Declarations ----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -47,6 +49,7 @@
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaARM.h"
 #include "clang/Sema/SemaCUDA.h"
+#include "clang/Sema/SemaGTaP.h"
 #include "clang/Sema/SemaHLSL.h"
 #include "clang/Sema/SemaInternal.h"
 #include "clang/Sema/SemaObjC.h"
@@ -15877,6 +15880,9 @@ Decl *Sema::ActOnStartOfFunctionDef(Scope *FnBodyScope, Decl *D,
   else
     FD = cast<FunctionDecl>(D);
 
+  // Handle pending GTaP function pragma - attach attribute if pending
+  GTaP().ActOnStartOfFunctionDef(FD);
+
   // Do not push if it is a lambda because one is already pushed when building
   // the lambda in ActOnStartOfLambdaDefinition().
   if (!isLambdaCallOperator(FD))
@@ -16293,6 +16299,17 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
       // the same storage; don't overwrite the latter if the former is null
       // (the body is initialised to null anyway, so even if the latter isn't
       // present, this would still be a no-op).
+      if (Body)
+        if (FD->hasAttr<GTaPFunctionAttr>()) {
+          if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
+            StmtResult SMBody = GTaP().TransformTaskFunctionBody(FD, CS);
+            if (SMBody.isInvalid()) return nullptr;
+            Body = SMBody.get();
+          } else {
+            Diag(FD->getLocation(), diag::err_gtap_function_requires_compound_body);
+            return nullptr;
+          }
+        }
       if (Body)
         FD->setBody(Body);
       FD->setWillHaveBody(false);

@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- RecursiveASTVisitor.h - Recursive AST Visitor ----------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -38,6 +40,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtSYCL.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/TemplateName.h"
@@ -499,6 +502,8 @@ private:
   bool TraverseOMPExecutableDirective(OMPExecutableDirective *S);
   bool TraverseOMPLoopDirective(OMPLoopDirective *S);
   bool TraverseOMPClause(OMPClause *C);
+  bool TraverseGTaPExecutableDirective(GTaPExecutableDirective *S);
+
 #define GEN_CLANG_CLAUSE_CLASS
 #define CLAUSE_CLASS(Enum, Str, Class) bool Visit##Class(Class *C);
 #include "llvm/Frontend/OpenMP/OMP.inc"
@@ -3055,6 +3060,14 @@ bool RecursiveASTVisitor<Derived>::TraverseOMPExecutableDirective(
   return true;
 }
 
+template <typename Derived>
+bool RecursiveASTVisitor<Derived>::TraverseGTaPExecutableDirective(
+    GTaPExecutableDirective *S) {
+  // GTaP directives don't have clauses yet, but this is where we would
+  // traverse them if we add clause support in the future.
+  return true;
+}
+
 DEF_TRAVERSE_STMT(OMPCanonicalLoop, {
   if (!getDerived().shouldVisitImplicitCode()) {
     // Visit only the syntactical loop.
@@ -3298,6 +3311,16 @@ DEF_TRAVERSE_STMT(OMPAssumeDirective,
 
 DEF_TRAVERSE_STMT(OMPErrorDirective,
                   { TRY_TO(TraverseOMPExecutableDirective(S)); })
+
+// GTaP Directives
+DEF_TRAVERSE_STMT(GTaPTaskDirective,
+                  { TRY_TO(TraverseGTaPExecutableDirective(S)); })
+DEF_TRAVERSE_STMT(GTaPTaskwaitDirective,
+                  { TRY_TO(TraverseGTaPExecutableDirective(S)); })
+DEF_TRAVERSE_STMT(GTaPInitDirective,
+                  { TRY_TO(TraverseGTaPExecutableDirective(S)); })
+DEF_TRAVERSE_STMT(GTaPEntryDirective,
+                  { TRY_TO(TraverseGTaPExecutableDirective(S)); })
 
 // OpenMP clauses.
 template <typename Derived>

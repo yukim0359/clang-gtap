@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===---- StmtProfile.cpp - Profile implementation for Stmt ASTs ----------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -966,6 +968,13 @@ void OMPClauseProfiler::VisitOMPXBareClause(const OMPXBareClause *C) {}
 } // namespace
 
 void
+StmtProfiler::VisitGTaPExecutableDirective(const GTaPExecutableDirective *S) {
+  VisitStmt(S);
+  // GTaP directives don't have clauses yet, but this is where we would
+  // profile them if we add clause support in the future.
+}
+
+void
 StmtProfiler::VisitOMPExecutableDirective(const OMPExecutableDirective *S) {
   VisitStmt(S);
   OMPClauseProfiler P(this);
@@ -1098,6 +1107,23 @@ void StmtProfiler::VisitOMPBarrierDirective(const OMPBarrierDirective *S) {
 
 void StmtProfiler::VisitOMPTaskwaitDirective(const OMPTaskwaitDirective *S) {
   VisitOMPExecutableDirective(S);
+}
+
+// GTaP Directives
+void StmtProfiler::VisitGTaPTaskDirective(const GTaPTaskDirective *S) {
+  VisitGTaPExecutableDirective(S);
+}
+
+void StmtProfiler::VisitGTaPTaskwaitDirective(const GTaPTaskwaitDirective *S) {
+  VisitGTaPExecutableDirective(S);
+}
+
+void StmtProfiler::VisitGTaPInitDirective(const GTaPInitDirective *S) {
+  VisitGTaPExecutableDirective(S);
+}
+
+void StmtProfiler::VisitGTaPEntryDirective(const GTaPEntryDirective *S) {
+  VisitGTaPExecutableDirective(S);
 }
 
 void StmtProfiler::VisitOMPAssumeDirective(const OMPAssumeDirective *S) {

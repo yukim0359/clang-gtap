@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //==--- Attr.td - attribute definitions -----------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1551,6 +1553,14 @@ def CUDAHost : InheritableAttr {
   let SimpleHandler = 1;
 }
 def : MutualExclusions<[CUDAGlobal, CUDAHost]>;
+
+def GTaPFunction : InheritableAttr {
+  let Spellings = [];
+  let Subjects = SubjectList<[Function]>;
+  let Args = [StringArgument<"WorkerSize">];
+  let Documentation = [Undocumented];
+  let LangOpts = [CUDA];
+}
 
 def CUDAGridConstant : InheritableAttr {
   let Spellings = [GNU<"grid_constant">, Declspec<"__grid_constant__">];

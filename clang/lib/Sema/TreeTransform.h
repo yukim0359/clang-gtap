@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===------- TreeTransform.h - Semantic Tree Transformation -----*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -29,7 +31,9 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtSYCL.h"
+#include "clang/Sema/SemaGTaP.h"
 #include "clang/Basic/DiagnosticParse.h"
 #include "clang/Basic/OpenMPKinds.h"
 #include "clang/Sema/Designator.h"
@@ -1670,6 +1674,28 @@ public:
 
     return getSema().OpenMP().ActOnOpenMPExecutableDirective(
         Kind, DirName, CancelRegion, Clauses, AStmt, StartLoc, EndLoc);
+  }
+
+  StmtResult RebuildGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc,
+                                      SourceLocation EndLoc, Expr *QueueExpr) {
+    return getSema().GTaP().ActOnGTaPTaskDirective(AStmt, StartLoc, EndLoc, QueueExpr);
+  }
+
+  StmtResult RebuildGTaPTaskwaitDirective(SourceLocation StartLoc,
+                                          SourceLocation EndLoc, Expr *QueueExpr) {
+    return getSema().GTaP().ActOnGTaPTaskwaitDirective(StartLoc, EndLoc, QueueExpr);
+  }
+
+  StmtResult RebuildGTaPInitDirective(SourceLocation StartLoc,
+                                      SourceLocation EndLoc,
+                                      StringRef RuntimeType,
+                                      StringRef FunctionName) {
+    return getSema().GTaP().ActOnGTaPInitDirective(StartLoc, EndLoc, RuntimeType, FunctionName);
+  }
+
+  StmtResult RebuildGTaPEntryDirective(SourceLocation StartLoc,
+                                       SourceLocation EndLoc, Stmt *AStmt) {
+    return getSema().GTaP().ActOnGTaPEntryDirective(StartLoc, EndLoc, AStmt);
   }
 
   /// Build a new OpenMP informational directive.
@@ -9868,6 +9894,53 @@ TreeTransform<Derived>::TransformOMPTaskwaitDirective(OMPTaskwaitDirective *D) {
   StmtResult Res = getDerived().TransformOMPExecutableDirective(D);
   getDerived().getSema().OpenMP().EndOpenMPDSABlock(Res.get());
   return Res;
+}
+
+// GTaP Directives
+template <typename Derived>
+StmtResult
+TreeTransform<Derived>::TransformGTaPTaskDirective(GTaPTaskDirective *D) {
+  Stmt *AssociatedStmt = nullptr;
+  Expr *K = D->getQueueExpr();
+  ExprResult TK = K ? TransformExpr(K) : ExprResult();
+  if (D->hasAssociatedStmt()) {
+    StmtResult Body = getDerived().TransformStmt(D->getAssociatedStmt());
+    if (Body.isInvalid())
+      return StmtError();
+    AssociatedStmt = Body.get();
+  }
+  return getDerived().RebuildGTaPTaskDirective(AssociatedStmt, D->getBeginLoc(), D->getEndLoc(),
+                                               TK.isUsable() ? TK.get() : nullptr);
+}
+
+template <typename Derived>
+StmtResult
+TreeTransform<Derived>::TransformGTaPTaskwaitDirective(
+    GTaPTaskwaitDirective *D) {
+  Expr *K = D->getQueueExpr();
+  ExprResult TK = K ? TransformExpr(K) : ExprResult();
+  return getDerived().RebuildGTaPTaskwaitDirective(D->getBeginLoc(), D->getEndLoc(), 
+                                                   TK.isUsable() ? TK.get() : nullptr);
+}
+
+template <typename Derived>
+StmtResult
+TreeTransform<Derived>::TransformGTaPInitDirective(GTaPInitDirective *D) {
+  return getDerived().RebuildGTaPInitDirective(D->getBeginLoc(), D->getEndLoc(),
+                                               D->getRuntimeType(), D->getFunctionName());
+}
+
+template <typename Derived>
+StmtResult
+TreeTransform<Derived>::TransformGTaPEntryDirective(GTaPEntryDirective *D) {
+  Stmt *AStmt = nullptr;
+  if (D->hasAssociatedStmt()) {
+    StmtResult TransformedStmt = getDerived().TransformStmt(D->getAssociatedStmt());
+    if (TransformedStmt.isInvalid())
+      return StmtError();
+    AStmt = TransformedStmt.get();
+  }
+  return getDerived().RebuildGTaPEntryDirective(D->getBeginLoc(), D->getEndLoc(), AStmt);
 }
 
 template <typename Derived>

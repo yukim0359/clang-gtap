@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- ASTReaderStmt.cpp - Stmt/Expr Deserialization ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -27,6 +29,7 @@
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/ExprOpenMP.h"
 #include "clang/AST/NestedNameSpecifier.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/OpenMPClause.h"
 #include "clang/AST/OperationKinds.h"
 #include "clang/AST/Stmt.h"
@@ -2572,6 +2575,23 @@ void ASTStmtReader::VisitOMPErrorDirective(OMPErrorDirective *D) {
   VisitOMPExecutableDirective(D);
 }
 
+// GTaP Directives
+void ASTStmtReader::VisitGTaPTaskDirective(GTaPTaskDirective *D) {
+  VisitStmt(D);
+}
+
+void ASTStmtReader::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *D) {
+  VisitStmt(D);
+}
+
+void ASTStmtReader::VisitGTaPInitDirective(GTaPInitDirective *D) {
+  VisitStmt(D);
+}
+
+void ASTStmtReader::VisitGTaPEntryDirective(GTaPEntryDirective *D) {
+  VisitStmt(D);
+}
+
 void ASTStmtReader::VisitOMPTaskgroupDirective(OMPTaskgroupDirective *D) {
   VisitStmt(D);
   VisitOMPExecutableDirective(D);
@@ -3706,6 +3726,22 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case STMT_OMP_TASKWAIT_DIRECTIVE:
       S = OMPTaskwaitDirective::CreateEmpty(
           Context, Record[ASTStmtReader::NumStmtFields], Empty);
+      break;
+
+    case STMT_GTAP_TASK_DIRECTIVE:
+      S = GTaPTaskDirective::CreateEmpty(Context, Empty);
+      break;
+
+    case STMT_GTAP_TASKWAIT_DIRECTIVE:
+      S = GTaPTaskwaitDirective::CreateEmpty(Context, Empty);
+      break;
+
+    case STMT_GTAP_INIT_DIRECTIVE:
+      S = GTaPInitDirective::CreateEmpty(Context, Empty);
+      break;
+
+    case STMT_GTAP_ENTRY_DIRECTIVE:
+      S = GTaPEntryDirective::CreateEmpty(Context, Empty);
       break;
 
     case STMT_OMP_ERROR_DIRECTIVE:

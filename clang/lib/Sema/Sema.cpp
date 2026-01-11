@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- Sema.cpp - AST Builder and Semantic Analysis Implementation ------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -58,6 +60,7 @@
 #include "clang/Sema/SemaObjC.h"
 #include "clang/Sema/SemaOpenACC.h"
 #include "clang/Sema/SemaOpenCL.h"
+#include "clang/Sema/SemaGTaP.h"
 #include "clang/Sema/SemaOpenMP.h"
 #include "clang/Sema/SemaPPC.h"
 #include "clang/Sema/SemaPseudoObject.h"
@@ -297,6 +300,7 @@ Sema::Sema(Preprocessor &pp, ASTContext &ctxt, ASTConsumer &consumer,
       ObjCPtr(std::make_unique<SemaObjC>(*this)),
       OpenACCPtr(std::make_unique<SemaOpenACC>(*this)),
       OpenCLPtr(std::make_unique<SemaOpenCL>(*this)),
+      GTaPPtr(std::make_unique<SemaGTaP>(*this)),
       OpenMPPtr(std::make_unique<SemaOpenMP>(*this)),
       PPCPtr(std::make_unique<SemaPPC>(*this)),
       PseudoObjectPtr(std::make_unique<SemaPseudoObject>(*this)),
@@ -2956,4 +2960,8 @@ Attr *Sema::CreateAnnotationAttr(const ParsedAttr &AL) {
   }
 
   return CreateAnnotationAttr(AL, Str, Args);
+}
+
+bool Sema::isInGTaPEntryDirective() const {
+  return GTaPPtr && GTaPPtr->isInGTaPEntryDirective();
 }

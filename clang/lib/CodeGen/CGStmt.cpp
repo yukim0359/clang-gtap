@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- CGStmt.cpp - Emit LLVM Code from Statements ----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -19,6 +21,7 @@
 #include "clang/AST/Attr.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/Stmt.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/DiagnosticSema.h"
@@ -457,6 +460,13 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   case Stmt::OMPAssumeDirectiveClass:
     EmitOMPAssumeDirective(cast<OMPAssumeDirective>(*S));
     break;
+  // GTaP directives are transformed by Sema into CompoundStmt/ExprStmt,
+  // so they should not reach CodeGen. If they do, it's an error.
+  case Stmt::GTaPTaskDirectiveClass:
+  case Stmt::GTaPTaskwaitDirectiveClass:
+  case Stmt::GTaPInitDirectiveClass:
+  case Stmt::GTaPEntryDirectiveClass:
+    llvm_unreachable("GTaP directives should be transformed by Sema before reaching CodeGen");
   case Stmt::OpenACCComputeConstructClass:
     EmitOpenACCComputeConstruct(cast<OpenACCComputeConstruct>(*S));
     break;

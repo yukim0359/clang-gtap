@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- Parser.cpp - C Language Family Parser ----------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -827,6 +829,8 @@ Parser::ParseExternalDeclaration(ParsedAttributes &Attrs,
     return ParseOpenACCDirectiveDecl(AS, Attrs, DeclSpec::TST_unspecified,
                                      /*TagDecl=*/nullptr);
   }
+  case tok::annot_pragma_gtap:
+    return nullptr;
   case tok::annot_pragma_ms_pointers_to_members:
     HandlePragmaMSPointersToMembers();
     return nullptr;

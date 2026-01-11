@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- SemaCUDA.cpp - Semantic Analysis for CUDA constructs -------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -270,6 +272,14 @@ SemaCUDA::IdentifyPreference(const FunctionDecl *Caller,
        CallerTarget == CUDAFunctionTarget::Device ||
        CallerTarget == CUDAFunctionTarget::HostDevice) &&
       CalleeTarget == CUDAFunctionTarget::Host)
+    return CFP_HostDevice;
+
+  // GTaP entry directive allows host code to reference device functions.
+  // The actual call will be handled by the generated device kernel.
+  if (SemaRef.isInGTaPEntryDirective() &&
+      CallerTarget == CUDAFunctionTarget::Host &&
+      (CalleeTarget == CUDAFunctionTarget::Device ||
+       CalleeTarget == CUDAFunctionTarget::Global))
     return CFP_HostDevice;
 
   // (d) HostDevice behavior depends on compilation mode.

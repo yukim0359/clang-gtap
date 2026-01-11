@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- ParseStmt.cpp - Statement and Block Parser -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -461,6 +463,11 @@ Retry:
 
   case tok::annot_pragma_openacc:
     return ParseOpenACCDirectiveStmt();
+
+  case tok::annot_pragma_gtap:
+    ProhibitAttributes(CXX11Attrs);
+    ProhibitAttributes(GNUAttrs);
+    return ParseGTaPExecutableDirective();
 
   case tok::annot_pragma_ms_pointers_to_members:
     ProhibitAttributes(CXX11Attrs);

@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- Sema.h - Semantic Analysis & AST Building --------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -171,6 +173,7 @@ class SemaNVPTX;
 class SemaObjC;
 class SemaOpenACC;
 class SemaOpenCL;
+class SemaGTaP;
 class SemaOpenMP;
 class SemaPPC;
 class SemaPseudoObject;
@@ -1486,6 +1489,14 @@ public:
     return *OpenCLPtr;
   }
 
+  SemaGTaP &GTaP() {
+    assert(GTaPPtr && "SemaGTaP is dead");
+    return *GTaPPtr;
+  }
+
+  /// Check if we are currently inside a GTaP entry directive.
+  bool isInGTaPEntryDirective() const;
+
   SemaOpenMP &OpenMP() {
     assert(OpenMPPtr && "SemaOpenMP is dead");
     return *OpenMPPtr;
@@ -1585,6 +1596,7 @@ private:
   std::unique_ptr<SemaObjC> ObjCPtr;
   std::unique_ptr<SemaOpenACC> OpenACCPtr;
   std::unique_ptr<SemaOpenCL> OpenCLPtr;
+  std::unique_ptr<SemaGTaP> GTaPPtr;
   std::unique_ptr<SemaOpenMP> OpenMPPtr;
   std::unique_ptr<SemaPPC> PPCPtr;
   std::unique_ptr<SemaPseudoObject> PseudoObjectPtr;

@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- CXCursor.cpp - Routines for manipulating CXCursors -----------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -737,6 +739,18 @@ CXCursor cxcursor::MakeCXCursor(const Stmt *S, const Decl *Parent,
     break;
   case Stmt::OMPTaskwaitDirectiveClass:
     K = CXCursor_OMPTaskwaitDirective;
+    break;
+  case Stmt::GTaPTaskDirectiveClass:
+    K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
+    break;
+  case Stmt::GTaPTaskwaitDirectiveClass:
+    K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
+    break;
+  case Stmt::GTaPInitDirectiveClass:
+    K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
+    break;
+  case Stmt::GTaPEntryDirectiveClass:
+    K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
     break;
   case Stmt::OMPErrorDirectiveClass:
     K = CXCursor_OMPErrorDirective;

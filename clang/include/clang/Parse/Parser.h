@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- Parser.h - C Language Parser ---------------------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -6607,6 +6609,11 @@ private:
                                  OpenMPDirectiveKind DKind, SourceLocation Loc,
                                  bool ReadDirectiveWithinMetadirective);
 
+  /// Parses GTaP executable directive.
+  ///
+  /// This parses #pragma gtap directives (task, taskwait, init, entry).
+  StmtResult ParseGTaPExecutableDirective();
+
   /// Parses informational directive.
   ///
   /// \param StmtCtx The context in which we're parsing the directive.
@@ -7004,6 +7011,7 @@ private:
   std::unique_ptr<PragmaHandler> OpenCLExtensionHandler;
   std::unique_ptr<PragmaHandler> OpenMPHandler;
   std::unique_ptr<PragmaHandler> OpenACCHandler;
+  std::unique_ptr<PragmaHandler> GTaPHandler;
   std::unique_ptr<PragmaHandler> PCSectionHandler;
   std::unique_ptr<PragmaHandler> MSCommentHandler;
   std::unique_ptr<PragmaHandler> MSDetectMismatchHandler;

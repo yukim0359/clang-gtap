@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- SemaExceptionSpec.cpp - C++ Exception Specifications ---*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1515,6 +1517,10 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Stmt::OMPTaskLoopSimdDirectiveClass:
   case Stmt::OMPTaskwaitDirectiveClass:
   case Stmt::OMPTaskyieldDirectiveClass:
+  case Stmt::GTaPTaskDirectiveClass:
+  case Stmt::GTaPTaskwaitDirectiveClass:
+  case Stmt::GTaPInitDirectiveClass:
+  case Stmt::GTaPEntryDirectiveClass:
   case Stmt::OMPErrorDirectiveClass:
   case Stmt::OMPTeamsDirectiveClass:
   case Stmt::OMPTeamsDistributeDirectiveClass:

@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- ParsePragma.cpp - Language specific pragma parsing ---------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -23,6 +25,7 @@
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/SemaCUDA.h"
 #include "clang/Sema/SemaCodeCompletion.h"
+#include "clang/Sema/SemaGTaP.h"
 #include "clang/Sema/SemaRISCV.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -225,6 +228,158 @@ struct PragmaOpenACCHandler
                                   tok::annot_pragma_openacc_end,
                                   diag::err_acc_unexpected_directive> {
   PragmaOpenACCHandler() : PragmaSupportHandler("acc") {}
+};
+
+struct PragmaGTaPHandler
+    : public PragmaSupportHandler<tok::annot_pragma_gtap,
+                                  tok::annot_pragma_gtap_end,
+                                  diag::err_gtap_unexpected_directive> {
+  Sema &Actions;
+  
+  PragmaGTaPHandler(Sema &S) : PragmaSupportHandler("gtap"), Actions(S) {}
+  
+  void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                    Token &FirstToken) override {
+    // Peek at the next token to see if this is "#pragma gtap function"
+    Token PeekTok;
+    PP.Lex(PeekTok);
+    
+    if (PeekTok.is(tok::identifier) && 
+        PeekTok.getIdentifierInfo()->getName() == "function") {
+      // This is "#pragma gtap function" - handle it specially
+      HandleGTaPFunctionPragma(PP, FirstToken.getLocation());
+      return;
+    }
+    
+    // Otherwise, it's a regular GTaP directive - use the default behavior
+    // Put the token back into the token stream
+    Token *Toks = PP.getPreprocessorAllocator().Allocate<Token>(1);
+    Toks[0] = PeekTok;
+    PP.EnterTokenStream(ArrayRef<Token>(Toks, 1), /*DisableMacroExpansion=*/true,
+                        /*IsReinject=*/true);
+    PragmaSupportHandler::HandlePragma(PP, Introducer, FirstToken);
+  }
+  
+private:
+  static bool isBlockWorkerMacroDefined(Preprocessor &PP) {
+    IdentifierInfo *II = PP.getIdentifierInfo("__GTAP_WORKER_IS_BLOCK");
+    return PP.isMacroDefined(II);
+  }
+
+  static bool parseIntLiteralToken(Preprocessor &PP, Token &Tok, int64_t &Out) {
+    if (!Tok.is(tok::numeric_constant))
+      return false;
+    std::string Sp = PP.getSpelling(Tok);
+    char *End = nullptr;
+    long long V = strtoll(Sp.c_str(), &End, 0);
+    if (!End || *End != '\0')
+      return false;
+    Out = static_cast<int64_t>(V);
+    return true;
+  }
+  
+  void HandleGTaPFunctionPragma(Preprocessor &PP, SourceLocation PragmaLoc) {
+    Token Tok;
+    // 'function' token was already consumed by HandlePragma
+    PP.Lex(Tok); // Get next token
+    
+    // Expect: worker_size(identifier)
+    if (!Tok.is(tok::identifier) || Tok.getIdentifierInfo()->getName() != "worker_size") {
+      PP.Diag(Tok.getLocation(), diag::err_expected) << "worker_size";
+      return;
+    }
+    PP.Lex(Tok); // Consume 'worker_size'
+    
+    if (!Tok.is(tok::l_paren)) {
+      PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
+      return;
+    }
+    PP.Lex(Tok); // Consume '('
+    
+    if (!Tok.is(tok::identifier)) {
+      PP.Diag(Tok.getLocation(), diag::err_expected) << "identifier";
+      return;
+    }
+    
+    // Get the worker size identifier (e.g., "thread" or "block")
+    StringRef WorkerSize = Tok.getIdentifierInfo()->getName();
+    PP.Lex(Tok); // Consume identifier
+    
+    if (!Tok.is(tok::r_paren)) {
+      PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
+      return;
+    }
+    PP.Lex(Tok); // consume ')', now Tok is next token after worker_size(...)
+
+    // Optional: return_thread(<int>)  (only when __GTAP_WORKER_IS_BLOCK is defined)
+    bool HasReturnThread = false;
+    int64_t ReturnThread = 0;
+    SourceLocation ReturnThreadLoc;
+
+    while (Tok.is(tok::identifier)) {
+      StringRef Name = Tok.getIdentifierInfo()->getName();
+
+      if (Name == "return_thread") {
+        ReturnThreadLoc = Tok.getLocation();
+        if (!isBlockWorkerMacroDefined(PP)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected)
+              << "return_thread requires __GTAP_WORKER_IS_BLOCK";
+          // consume until eod for recovery
+          while (!Tok.is(tok::eod)) PP.Lex(Tok);
+          return;
+        }
+
+        if (WorkerSize != "block") {
+          PP.Diag(Tok.getLocation(), diag::err_expected)
+              << "return_thread is only valid with worker_size(block)";
+          while (!Tok.is(tok::eod)) PP.Lex(Tok);
+          return;
+        }
+        PP.Lex(Tok); // consume 'return_thread'
+
+        if (!Tok.is(tok::l_paren)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
+          return;
+        }
+        PP.Lex(Tok); // consume '('
+
+        int64_t V = 0;
+        if (!parseIntLiteralToken(PP, Tok, V)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << "integer literal";
+          return;
+        }
+        if (V < 0) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << "non-negative integer";
+          return;
+        }
+        PP.Lex(Tok); // consume number
+
+        if (!Tok.is(tok::r_paren)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
+          return;
+        }
+        PP.Lex(Tok); // consume ')', now Tok is next
+
+        HasReturnThread = true;
+        ReturnThread = V;
+        continue;
+      }
+      // Unknown clause name -> stop and let "extra tokens" warning handle it
+      break;
+    }
+    
+    // Expect end of pragma
+    if (!Tok.is(tok::eod)) {
+      PP.Diag(Tok.getLocation(), diag::warn_pragma_extra_tokens_at_eol) << "gtap function";
+      return;
+    }
+    
+    Actions.GTaP().PendingFunctionWorkerSize = WorkerSize;
+    Actions.GTaP().PendingFunctionPragmaLoc = PragmaLoc;
+    if (HasReturnThread) {
+      Actions.GTaP().PendingFunctionReturnThread = ReturnThread;
+    }
+  }
 };
 
 /// PragmaCommentHandler - "\#pragma comment ...".
@@ -472,6 +627,10 @@ void Parser::initializePragmaHandlers() {
     OpenACCHandler = std::make_unique<PragmaNoOpenACCHandler>();
   PP.AddPragmaHandler(OpenACCHandler.get());
 
+  // Register GTaP pragma handler (handles both regular directives and #pragma gtap function)
+  GTaPHandler = std::make_unique<PragmaGTaPHandler>(Actions);
+  PP.AddPragmaHandler(GTaPHandler.get());
+
   if (getLangOpts().MicrosoftExt ||
       getTargetInfo().getTriple().isOSBinFormatELF()) {
     MSCommentHandler = std::make_unique<PragmaCommentHandler>(Actions);
@@ -593,6 +752,9 @@ void Parser::resetPragmaHandlers() {
 
   PP.RemovePragmaHandler(OpenACCHandler.get());
   OpenACCHandler.reset();
+
+  PP.RemovePragmaHandler(GTaPHandler.get());
+  GTaPHandler.reset();
 
   if (getLangOpts().MicrosoftExt ||
       getTargetInfo().getTriple().isOSBinFormatELF()) {

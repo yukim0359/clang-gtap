@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- TokenKinds.def - C Family Token Kind Database ----------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1004,6 +1006,12 @@ PRAGMA_ANNOTATION(pragma_openmp_end)
 // #pragma acc directive so it can be handled during parsing of the directives.
 PRAGMA_ANNOTATION(pragma_openacc)
 PRAGMA_ANNOTATION(pragma_openacc_end)
+
+// Annotations for GTaP pragma directives - #pragma gtap.
+// These are produced by the lexer when it parses a #pragma gtap directive
+// so it can be handled during parsing of the directives.
+PRAGMA_ANNOTATION(pragma_gtap)
+PRAGMA_ANNOTATION(pragma_gtap_end)
 
 // Annotations for loop pragma directives #pragma clang loop ...
 // The lexer produces these so that they only take effect when the parser

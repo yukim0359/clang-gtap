@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===-- CodeGenFunction.h - Per-Function state for LLVM CodeGen -*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -83,6 +85,10 @@ class OMPUseDevicePtrClause;
 class OMPUseDeviceAddrClause;
 class SVETypeFlags;
 class OMPExecutableDirective;
+class GTaPInitDirective;
+class GTaPTaskDirective;
+class GTaPTaskwaitDirective;
+class GTaPEntryDirective;
 
 namespace analyze_os_log {
 class OSLogBufferLayout;

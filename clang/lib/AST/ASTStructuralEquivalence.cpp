@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- ASTStructuralEquivalence.cpp ---------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -78,6 +80,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtSYCL.h"
 #include "clang/AST/TemplateBase.h"
 #include "clang/AST/TemplateName.h"
@@ -402,6 +405,13 @@ class StmtComparer {
 
   bool IsStmtEquivalent(const CXXBoolLiteralExpr *E1, const CXXBoolLiteralExpr *E2) {
     return E1->getValue() == E2->getValue();
+  }
+
+  // GTaP Directives
+  bool IsStmtEquivalent(const GTaPExecutableDirective *S1, const GTaPExecutableDirective *S2) {
+    // For now, just check that they are the same kind.
+    // In the future, we may need to check clauses and other properties.
+    return S1->getDirectiveKind() == S2->getDirectiveKind();
   }
 
   /// End point of the traversal chain.

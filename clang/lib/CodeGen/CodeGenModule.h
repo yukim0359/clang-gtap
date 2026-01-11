@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- CodeGenModule.h - Per-Module state for LLVM CodeGen ----*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -729,6 +731,7 @@ public:
     assert(OpenMPRuntime != nullptr);
     return *OpenMPRuntime;
   }
+
 
   /// Return a reference to the configured CUDA runtime.
   CGCUDARuntime &getCUDARuntime() {

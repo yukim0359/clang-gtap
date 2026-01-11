@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- StmtVisitor.h - Visitor for Stmt subclasses --------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -22,6 +24,7 @@
 #include "clang/AST/StmtObjC.h"
 #include "clang/AST/StmtOpenACC.h"
 #include "clang/AST/StmtOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtSYCL.h"
 #include "clang/Basic/LLVM.h"
 #include "llvm/ADT/STLExtras.h"

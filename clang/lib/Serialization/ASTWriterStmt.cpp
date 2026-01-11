@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===--- ASTWriterStmt.cpp - Statement and Expression Serialization -------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -17,6 +19,7 @@
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprOpenMP.h"
+#include "clang/AST/StmtGTaP.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/ASTRecordWriter.h"
@@ -2647,6 +2650,27 @@ void ASTStmtWriter::VisitOMPErrorDirective(OMPErrorDirective *D) {
   Record.push_back(D->getNumClauses());
   VisitOMPExecutableDirective(D);
   Code = serialization::STMT_OMP_ERROR_DIRECTIVE;
+}
+
+// GTaP Directives
+void ASTStmtWriter::VisitGTaPTaskDirective(GTaPTaskDirective *D) {
+  VisitStmt(D);
+  Code = serialization::STMT_GTAP_TASK_DIRECTIVE;
+}
+
+void ASTStmtWriter::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *D) {
+  VisitStmt(D);
+  Code = serialization::STMT_GTAP_TASKWAIT_DIRECTIVE;
+}
+
+void ASTStmtWriter::VisitGTaPInitDirective(GTaPInitDirective *D) {
+  VisitStmt(D);
+  Code = serialization::STMT_GTAP_INIT_DIRECTIVE;
+}
+
+void ASTStmtWriter::VisitGTaPEntryDirective(GTaPEntryDirective *D) {
+  VisitStmt(D);
+  Code = serialization::STMT_GTAP_ENTRY_DIRECTIVE;
 }
 
 void ASTStmtWriter::VisitOMPTaskgroupDirective(OMPTaskgroupDirective *D) {

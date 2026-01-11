@@ -1,3 +1,5 @@
+// This file is edited by maeda under gpu-task-parallelism project based on llvm-project.
+
 //===- ASTBitCodes.h - Enum values for the PCH bitcode format ---*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
@@ -1965,6 +1967,10 @@ enum StmtCode {
   STMT_OMP_ERROR_DIRECTIVE,
   STMT_OMP_BARRIER_DIRECTIVE,
   STMT_OMP_TASKWAIT_DIRECTIVE,
+  STMT_GTAP_TASK_DIRECTIVE,
+  STMT_GTAP_TASKWAIT_DIRECTIVE,
+  STMT_GTAP_INIT_DIRECTIVE,
+  STMT_GTAP_ENTRY_DIRECTIVE,
   STMT_OMP_FLUSH_DIRECTIVE,
   STMT_OMP_DEPOBJ_DIRECTIVE,
   STMT_OMP_SCAN_DIRECTIVE,
