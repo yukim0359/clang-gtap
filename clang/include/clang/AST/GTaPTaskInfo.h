@@ -38,8 +38,8 @@ struct GTaPTaskFunctionInfo {
   std::vector<FieldDecl *> CapturedFields;
   FieldDecl *StateField = nullptr;
   FieldDecl *ResultField = nullptr;
-  llvm::DenseSet<const VarDecl*> SpillSet;      // taskwait で値を保存すべき
-  llvm::DenseSet<const VarDecl*> HoistOnlySet;  // スコープ維持のため promote だけ
+  llvm::DenseSet<const VarDecl*> SpillSet;
+  llvm::DenseSet<const VarDecl*> HoistOnlySet;
   FunctionDecl *StateMachineFD = nullptr;
   unsigned ReturnThread = 0;  // Thread index for result write guard (when worker_size is block)
 };
