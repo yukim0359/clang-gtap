@@ -220,15 +220,15 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
   if (TaskInfo.TaskRecord && !TaskInfo.TaskRecord->isCompleteDefinition())
     TaskInfo.TaskRecord->completeDefinition();
 
-  llvm::errs() << "[GTaP] FieldMap entries:\n";
+  // llvm::errs() << "[GTaP] FieldMap entries:\n";
   for (auto &KV : FieldMap) {
     auto *VD = KV.first;
     auto *FD = KV.second;
-    llvm::errs() << "  key=" << (const void*)VD
-                << " kind=" << VD->getDeclKindName()
-                << " name=" << VD->getName()
-                << " -> field=" << (const void*)FD
-                << " fieldName=" << FD->getName() << "\n";
+    // llvm::errs() << "  key=" << (const void*)VD
+    //             << " kind=" << VD->getDeclKindName()
+    //             << " name=" << VD->getName()
+    //             << " -> field=" << (const void*)FD
+    //             << " fieldName=" << FD->getName() << "\n";
   }
   return TaskInfo.TaskRecord;
 }
@@ -256,34 +256,34 @@ public:
   //   TransformStmt(Stmt *, StmtDiscardKind)
   using Base::TransformStmt;
 
-  StmtResult TransformStmt(Stmt *S) {
-    if (S)
-      llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind="
-                   << S->getStmtClassName() << ")\n";
-    else
-      llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind=<null>)\n";
-    return Base::TransformStmt(S);
-  }
+  // StmtResult TransformStmt(Stmt *S) {
+  //   if (S)
+  //     llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind="
+  //                  << S->getStmtClassName() << ")\n";
+  //   else
+  //     llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind=<null>)\n";
+  //   return Base::TransformStmt(S);
+  // }
 
-  StmtResult TransformStmt(Stmt *S,
-                           typename Base::StmtDiscardKind SDK) {
-    if (S)
-      llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind="
-                   << S->getStmtClassName() << ", SDK)\n";
-    else
-      llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind=<null>, SDK)\n";
-    return Base::TransformStmt(S, SDK);
-  }
+  // StmtResult TransformStmt(Stmt *S,
+  //                          typename Base::StmtDiscardKind SDK) {
+  //   if (S)
+  //     llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind="
+  //                  << S->getStmtClassName() << ", SDK)\n";
+  //   else
+  //     llvm::errs() << "[GTaP][Sema][Body] TransformStmt(kind=<null>, SDK)\n";
+  //   return Base::TransformStmt(S, SDK);
+  // }
 
   ExprResult TransformDeclRefExpr(DeclRefExpr *DRE) {
     const ValueDecl *VD = DRE->getDecl();
     const auto *canonRef = dyn_cast<ValueDecl>(VD->getCanonicalDecl());
-    llvm::errs() << "[GTaP] TransformDeclRefExpr: "
-                 << canonRef->getName() << " decl=" << (const void*)canonRef << "\n";
+    // llvm::errs() << "[GTaP] TransformDeclRefExpr: "
+    //              << canonRef->getName() << " decl=" << (const void*)canonRef << "\n";
     auto It = FieldMap.find(canonRef);
     if (It == FieldMap.end()) {
-      llvm::errs() << "[GTaP] FieldMap MISS in DRE: "
-                   << canonRef->getName() << " decl=" << (const void*)canonRef << "\n";
+      // llvm::errs() << "[GTaP] FieldMap MISS in DRE: "
+      //              << canonRef->getName() << " decl=" << (const void*)canonRef << "\n";
       return Base::TransformDeclRefExpr(DRE);
     }
     FieldDecl *Field = It->second;
@@ -307,7 +307,7 @@ public:
   // }
 
   StmtResult TransformDeclStmt(DeclStmt *DS) {
-    llvm::errs() << "[VR] TransformDeclStmt\n";
+    // llvm::errs() << "[VR] TransformDeclStmt\n";
   
     SmallVector<Stmt*, 4> Stmts;          // Return statements (DeclStmt + Assign)
     SmallVector<Decl*, 4> KeepDecls;      // For non-captured VarDecls to keep
@@ -536,11 +536,17 @@ public:
         return StmtError();
       }
       
-      // Create a temporary variable for the task data structure
       QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(CalleeTaskRecord));
-      std::string TaskVarName = "__gtap_task_" + Callee->getName().str() + "_" + 
-                               std::to_string(reinterpret_cast<uintptr_t>(OriginalCall));
-      IdentifierInfo &TaskVarId = Ctx.Idents.get(TaskVarName);
+      QualType VoidTy = Ctx.VoidTy;
+      QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
+      QualType IntTy = Ctx.IntTy;
+      QualType IntPtrTy = Ctx.getPointerType(IntTy);
+      QualType TaskCtxPtrTy = VoidPtrTy;
+      if (QualType TaskCtxTy = lookupNamedType(Base::getSema(), "TaskContext");
+          !TaskCtxTy.isNull()) {
+        TaskCtxPtrTy = Ctx.getPointerType(TaskCtxTy);
+      }
+      QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
       
       // Get the current function's DeclContext from SelfDecl
       DeclContext *CurrentDC = SelfDecl->getDeclContext();
@@ -549,28 +555,116 @@ public:
         return StmtError();
       }
       
-      VarDecl *TaskVar = VarDecl::Create(
+      SmallVector<Stmt *, 8> TaskStmts;
+      
+      // Step 1: Call __gtap_spawn_task(ctx, self_tid, child_count, func, queue_idx) -> void*
+      // This allocates task ID, sets up TaskHeader, and returns task data pointer
+      FunctionDecl *SpawnTaskFunc = requireRuntimeFunction(
+          Base::getSema(), "__gtap_spawn_task", Dir->getBeginLoc());
+      if (!SpawnTaskFunc) {
+        InTaskDirective = OldInTaskDirective;
+        return StmtError();
+      }
+      
+      // Build queue_idx argument
+      Expr *QueueArg = nullptr;
+      if (Expr *QE = Dir->getQueueExpr()) {
+        ExprResult TQ = getDerived().TransformExpr(QE);
+        if (TQ.isInvalid()) return StmtError();
+        Expr *E = TQ.get();
+        if (!E->getType()->isIntegerType()) {
+          // diag and fallback to 0
+        }
+        QueueArg = ImplicitCastExpr::Create(
+            Ctx, IntTy, CK_IntegralCast, toRValue(E), nullptr, VK_PRValue, FPOptionsOverride());
+      }
+      if (!QueueArg) {
+        QueueArg = IntegerLiteral::Create(
+            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
+      }
+      
+      // Build func_ptr argument
+      auto &TI = SemaGTaPRef.getCachedTaskInfo(CalleeFD);
+      FunctionDecl *StateMachineFD = TI.StateMachineFD;
+      if (!StateMachineFD) {
+        StateMachineFD = SemaGTaPRef.getOrCreateStateMachineFunction(CalleeFD, VoidTy, VoidPtrTy, IntTy, TaskCtxPtrTy);
+      }
+      
+      ExprResult StateMachineRefER = S.BuildDeclRefExpr(StateMachineFD, StateMachineFD->getType(), VK_LValue, SourceLocation());
+      Expr *StateMachineRef = StateMachineRefER.get();
+      
+      QualType StateMachinePtrTy = Ctx.getPointerType(StateMachineFD->getType());
+      Expr *StateMachinePtr = ImplicitCastExpr::Create(
+          Ctx, StateMachinePtrTy, CK_FunctionToPointerDecay, StateMachineRef, nullptr, VK_PRValue, FPOptionsOverride());
+      
+      // Build child_count address
+      Expr *ChildCountRef = DeclRefExpr::Create(
+          Ctx, NestedNameSpecifierLoc(), SourceLocation(), ChildCountVar,
+          false, SourceLocation(), IntTy, VK_LValue);
+      Expr *ChildCountAddr = UnaryOperator::Create(
+          Ctx, ChildCountRef, UO_AddrOf, IntPtrTy, VK_PRValue,
+          OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
+      
+      // Build __gtap_spawn_task call
+      // Signature: void* __gtap_spawn_task(TaskContext* ctx, int self_tid, int* child_count, 
+      //                                    void (*func)(...), int queue_idx)
+      SmallVector<Expr *, 5> SpawnArgs;
+      SpawnArgs.push_back(buildParamRValue(CtxParam));      // ctx
+      SpawnArgs.push_back(buildParamRValue(TidParam));      // self_tid
+      SpawnArgs.push_back(ChildCountAddr);                   // child_count
+      SpawnArgs.push_back(StateMachinePtr);                  // func
+      SpawnArgs.push_back(QueueArg);                         // queue_idx
+      
+      ExprResult SpawnCallee = S.BuildDeclRefExpr(
+          SpawnTaskFunc, SpawnTaskFunc->getType(), VK_LValue, SourceLocation());
+      if (SpawnCallee.isInvalid())
+        return StmtError();
+      
+      ExprResult SpawnCallER = S.BuildCallExpr(
+          /*Scope=*/nullptr, SpawnCallee.get(), SourceLocation(),
+          SpawnArgs, SourceLocation());
+      if (SpawnCallER.isInvalid())
+        return StmtError();
+      Expr *SpawnCall = SpawnCallER.get();
+      
+      // Cast void* return value to TaskRecordTy*
+      Expr *TaskPtrInit = CStyleCastExpr::Create(
+          Ctx, TaskPtrTy, VK_PRValue, CK_BitCast, SpawnCall,
+          nullptr, FPOptionsOverride(),
+          Ctx.getTrivialTypeSourceInfo(TaskPtrTy),
+          SourceLocation(), SourceLocation());
+      
+      // Declare: TaskRecordTy* __gtap_task_ptr = (TaskRecordTy*)__gtap_spawn_task(...);
+      std::string TaskPtrName = "__gtap_task_ptr_" + Callee->getName().str() + "_" + 
+                               std::to_string(reinterpret_cast<uintptr_t>(OriginalCall));
+      IdentifierInfo &TaskPtrId = Ctx.Idents.get(TaskPtrName);
+      VarDecl *TaskPtrVar = VarDecl::Create(
           Ctx, CurrentDC, SourceLocation(), SourceLocation(),
-          &TaskVarId, TaskRecordTy, Ctx.getTrivialTypeSourceInfo(TaskRecordTy),
+          &TaskPtrId, TaskPtrTy, Ctx.getTrivialTypeSourceInfo(TaskPtrTy),
           SC_None);
+      TaskPtrVar->setInit(TaskPtrInit);
       
-      // Create initialization: initialize all fields to zero/default
-      // Then assign user arguments to corresponding fields
-      SmallVector<Stmt *, 8> InitStmts;
+      DeclStmt *TaskPtrDecl = new (Ctx) DeclStmt(
+          DeclGroupRef(TaskPtrVar), SourceLocation(), SourceLocation());
+      TaskStmts.push_back(TaskPtrDecl);
       
-      // Initialize task data structure (zero-initialize)
-      Expr *TaskVarRef = DeclRefExpr::Create(
-          Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskVar,
-          false, SourceLocation(), TaskRecordTy, VK_LValue);
+      // Create TaskPtrRef for field access (use arrow operator since it's a pointer)
+      auto buildTaskPtrRef = [&]() -> Expr* {
+        Expr *PtrRef = DeclRefExpr::Create(
+            Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
+            false, SourceLocation(), TaskPtrTy, VK_LValue);
+        return ImplicitCastExpr::Create(
+            Ctx, TaskPtrTy, CK_LValueToRValue, PtrRef, nullptr, VK_PRValue, FPOptionsOverride());
+      };
       
-      // Transform user arguments and assign to fields
+      // Step 2: Store arguments to task data fields via returned pointer
       unsigned ArgIndex = 0;
       for (Expr *Arg : OriginalCall->arguments()) {
         ExprResult TransformedArg = getDerived().TransformExpr(Arg);
         if (TransformedArg.isInvalid())
           return StmtError();
         
-        // Assign to corresponding parameter field
+        // Assign to corresponding parameter field via pointer (arrow access)
         if (ArgIndex < CalleeTaskInfo.Parameters.size()) {
           ParmVarDecl *Param = CalleeTaskInfo.Parameters[ArgIndex];
           if (Param) {
@@ -578,13 +672,14 @@ public:
             auto FieldIt = CalleeFieldMap.find(Key);
             if (FieldIt != CalleeFieldMap.end()) {
               FieldDecl *Field = FieldIt->second;
-              ExprResult FieldRefER = B.buildFieldAccess(TaskVarRef, false, Field, SourceLocation());
+              // Use arrow access (IsArrow=true) since TaskPtrVar is a pointer
+              ExprResult FieldRefER = B.buildFieldAccess(buildTaskPtrRef(), /*IsArrow=*/true, Field, SourceLocation());
               if (FieldRefER.isInvalid()) return StmtError();
               Expr *FieldRef = FieldRefER.get();
               ExprResult AssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, FieldRef, TransformedArg.get());
               if (AssignER.isInvalid()) return StmtError();
               Expr *Assign = AssignER.get();
-              InitStmts.push_back(Assign);
+              TaskStmts.push_back(Assign);
             }
           }
         }
@@ -593,7 +688,7 @@ public:
       
       // Initialize result field
       if (CalleeTaskInfo.ResultField) {
-        ExprResult ResultFieldRefER = B.buildFieldAccess(TaskVarRef, false, CalleeTaskInfo.ResultField, SourceLocation());
+        ExprResult ResultFieldRefER = B.buildFieldAccess(buildTaskPtrRef(), /*IsArrow=*/true, CalleeTaskInfo.ResultField, SourceLocation());
         if (ResultFieldRefER.isInvalid()) return StmtError();
         Expr *ResultFieldRef = ResultFieldRefER.get();
         QualType ResultTy = CalleeTaskInfo.ResultField->getType();
@@ -619,139 +714,15 @@ public:
           ExprResult ResultAssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, ResultFieldRef, ZeroInit);
           if (ResultAssignER.isInvalid()) return StmtError();
           Expr *ResultAssign = ResultAssignER.get();
-          InitStmts.push_back(ResultAssign);
+          TaskStmts.push_back(ResultAssign);
         }
       }
-      
-      // Create compound statement for initialization
-      Stmt *InitCompound = nullptr;
-      if (!InitStmts.empty()) {
-        InitCompound = CompoundStmt::Create(
-            Ctx, InitStmts, FPOptionsOverride(),
-            SourceLocation(), SourceLocation());
-      }
-      
-      // Create declaration statement with initialization
-      DeclStmt *TaskVarDecl = new (Ctx) DeclStmt(
-          DeclGroupRef(TaskVar), SourceLocation(), SourceLocation());
-      
-      // Create __gtap_spawn_task_raw call
-      // Signature: void __gtap_spawn_task_raw(TaskContext* ctx, int self_tid, int* child_count, 
-      //                                        void* func_ptr, const void* task_data_ptr, 
-      //                                        size_t task_data_size, int task_kind)
-      QualType VoidTy = Ctx.VoidTy;
-      QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
-      QualType IntTy = Ctx.IntTy;
-      QualType IntPtrTy = Ctx.getPointerType(IntTy);
-      QualType TaskCtxPtrTy = VoidPtrTy;
-      if (QualType TaskCtxTy = lookupNamedType(Base::getSema(), "TaskContext");
-          !TaskCtxTy.isNull()) {
-        TaskCtxPtrTy = Ctx.getPointerType(TaskCtxTy);
-      }
-      
-      // Get size_t type
-      QualType SizeTTy = Ctx.getSizeType();
-      
-      // Lookup __gtap_spawn_task_raw function
-      FunctionDecl *SpawnTaskFunc = requireRuntimeFunction(
-          Base::getSema(), "__gtap_spawn_task_raw", Dir->getBeginLoc());
-      if (!SpawnTaskFunc) {
-        InTaskDirective = OldInTaskDirective;
-        return StmtError();
-      }
-      
-      ExprResult SpawnCallee = S.BuildDeclRefExpr(
-          SpawnTaskFunc, SpawnTaskFunc->getType(), VK_LValue, SourceLocation());
-      if (SpawnCallee.isInvalid())
-        return StmtError();
-      
-      // Create arguments for __gtap_spawn_task_raw
-      SmallVector<Expr *, 7> SpawnArgs;
-      
-      // 1. ctx: TaskContext* - use CtxParam
-      SpawnArgs.push_back(buildParamRValue(CtxParam));
-      
-      // 2. self_tid: int - use TidParam
-      SpawnArgs.push_back(buildParamRValue(TidParam));
-      
-      // 3. child_count: int* - use function-level child_count variable
-      Expr *ChildCountRef = DeclRefExpr::Create(
-          Ctx, NestedNameSpecifierLoc(), SourceLocation(), ChildCountVar,
-          false, SourceLocation(), IntTy, VK_LValue);
-      Expr *ChildCountAddr = UnaryOperator::Create(
-          Ctx, ChildCountRef, UO_AddrOf, IntPtrTy, VK_PRValue,
-          OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-      SpawnArgs.push_back(ChildCountAddr);
-      
-      // 4. func_ptr: function pointer to the transformed function
-      auto &TI = SemaGTaPRef.getCachedTaskInfo(CalleeFD);
-      FunctionDecl *StateMachineFD = TI.StateMachineFD;
-      if (!StateMachineFD) {
-        StateMachineFD = SemaGTaPRef.getOrCreateStateMachineFunction(CalleeFD, VoidTy, VoidPtrTy, IntTy, TaskCtxPtrTy);
-      }
-      
-      ExprResult StateMachineRefER = S.BuildDeclRefExpr(StateMachineFD, StateMachineFD->getType(), VK_LValue, SourceLocation());
-      Expr *StateMachineRef = StateMachineRefER.get();
-      
-      QualType StateMachinePtrTy = Ctx.getPointerType(StateMachineFD->getType());
-      Expr *StateMachinePtr = ImplicitCastExpr::Create(
-          Ctx, StateMachinePtrTy, CK_FunctionToPointerDecay, StateMachineRef, nullptr, VK_PRValue, FPOptionsOverride());
-      
-      SpawnArgs.push_back(StateMachinePtr);
-      
-      // 5. task_data_ptr: const void* - address of TaskVar
-      QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
-      Expr *TaskVarAddr = UnaryOperator::Create(
-          Ctx, TaskVarRef, UO_AddrOf, TaskPtrTy, VK_PRValue,
-          OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-      Expr *TaskVarAddrVoid = CStyleCastExpr::Create(
-          Ctx, VoidPtrTy, VK_PRValue, CK_BitCast, TaskVarAddr,
-          nullptr, FPOptionsOverride(),
-          Ctx.getTrivialTypeSourceInfo(VoidPtrTy),
-          SourceLocation(), SourceLocation());
-      SpawnArgs.push_back(TaskVarAddrVoid);
-      
-      // 6. task_data_size: size_t - size of task data structure
-      // Calculate size using sizeof
-      Expr *SizeOfExpr = new (Ctx) UnaryExprOrTypeTraitExpr(
-          UETT_SizeOf, Ctx.getTrivialTypeSourceInfo(TaskRecordTy),
-          SizeTTy, SourceLocation(), SourceLocation());
-      SpawnArgs.push_back(SizeOfExpr);
-      
-      // 7. queue: int - queue number
-      Expr *QueueArg = nullptr;
-      if (Expr *QE = Dir->getQueueExpr()) {
-        ExprResult TQ = getDerived().TransformExpr(QE);
-        if (TQ.isInvalid()) return StmtError();
-        Expr *E = TQ.get();
-        if (!E->getType()->isIntegerType()) {
-          // diag and fallback to 0
-        }
-        QueueArg = ImplicitCastExpr::Create(
-            Ctx, IntTy, CK_IntegralCast, toRValue(E), nullptr, VK_PRValue, FPOptionsOverride());
-      }
-      if (!QueueArg) {
-        QueueArg = IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
-      }
-      SpawnArgs.push_back(QueueArg);
-      
-      // Create the __gtap_spawn_task_raw CallExpr
-      ExprResult SpawnCallER = S.BuildCallExpr(
-          /*Scope=*/nullptr, SpawnCallee.get(), OriginalCall->getExprLoc(),
-          SpawnArgs, OriginalCall->getExprLoc());
-      if (SpawnCallER.isInvalid())
-        return StmtError();
-      Expr *SpawnCall = SpawnCallER.get();
 
       unsigned MyChildIndex = SpawnOrdinal++;
       if (ResultVar) {
         if (!CalleeTaskInfo.ResultField) {
-          llvm::errs() << "[GTaP][Sema]  Result field is required\n";
-          // NOTE: result field is required
           return StmtError();
         } else {
-          llvm::errs() << "[GTaP][Sema]  Result field is found\n";
           TaskResultSlot Slot;
           Slot.LHSDecl = dyn_cast<ValueDecl>(ResultVar->getCanonicalDecl());
           Slot.ChildIndex = MyChildIndex;
@@ -761,12 +732,7 @@ public:
         }
       }
 
-      // Create compound statement: { TaskVarDecl; InitCompound; SpawnCall; }
-      SmallVector<Stmt *, 3> TaskStmts;
-      TaskStmts.push_back(TaskVarDecl);
-      if (InitCompound)
-        TaskStmts.push_back(InitCompound);
-      TaskStmts.push_back(SpawnCall);
+      // Create compound statement
       Stmt *TaskCompound = CompoundStmt::Create(
           Ctx, TaskStmts, FPOptionsOverride(),
           SourceLocation(), SourceLocation());
@@ -1029,7 +995,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   }
   
   std::string FuncName = CalleeDecl->getNameAsString();
-  llvm::errs() << "[GTaP][Sema] Entry function: " << FuncName << "\n";
+  // llvm::errs() << "[GTaP][Sema] Entry function: " << FuncName << "\n";
   
   // Get task info for the callee
   GTaPTaskFunctionInfo &TaskInfo = getCachedTaskInfo(CalleeDecl);
@@ -1047,10 +1013,10 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     return StmtError();
   }
   
-  llvm::errs() << "[GTaP][Sema] TaskRecord type: " << TaskRecordTy.getAsString() << "\n";
+  // llvm::errs() << "[GTaP][Sema] TaskRecord type: " << TaskRecordTy.getAsString() << "\n";
   
-  llvm::errs() << "[GTaP][Sema] Generating device entry code for function '"
-               << FuncName << "'\n";
+  // llvm::errs() << "[GTaP][Sema] Generating device entry code for function '"
+  //              << FuncName << "'\n";
   
   SmallVector<Stmt *, 16> DeviceStmts;
   
@@ -1103,7 +1069,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   
   if (TaskPtrVar && TaskPtrDeclStmt) {
     DeviceStmts.push_back(TaskPtrDeclStmt);
-    llvm::errs() << "[GTaP][Sema] Created task pointer (local to init block): " << TaskPtrName << "\n";
+    // llvm::errs() << "[GTaP][Sema] Created task pointer (local to init block): " << TaskPtrName << "\n";
     
     // Initialize task fields with function arguments using pointer
     unsigned ArgIndex = 0;
@@ -1217,7 +1183,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   FuncPtrVar->setInit(FuncPtrInit);
   DeviceStmts.push_back(new (Ctx) DeclStmt(DeclGroupRef(FuncPtrVar), StartLoc, EndLoc));
 
-  llvm::errs() << "[GTaP][Sema] Initialized __gtap_func_ptr from CalleeDecl directly (no function table)\n";
+  // llvm::errs() << "[GTaP][Sema] Initialized __gtap_func_ptr from CalleeDecl directly (no function table)\n";
   
   // Call __gtap_push_initial_task(__gtap_func_ptr, 0)
   FunctionDecl *PushTaskDeviceFn = requireRuntimeFunction(SemaRef, "__gtap_push_initial_task", StartLoc);
@@ -1246,10 +1212,10 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   
   if (!PushCall.isInvalid()) {
     DeviceStmts.push_back(PushCall.get());
-    llvm::errs() << "[GTaP][Sema] Generated __gtap_push_initial_task call\n";
+    // llvm::errs() << "[GTaP][Sema] Generated __gtap_push_initial_task call\n";
   }
   
-  llvm::errs() << "[GTaP][Sema] Finished initial task setup code\n";
+  // llvm::errs() << "[GTaP][Sema] Finished initial task setup code\n";
   
   // Execute task loop on device (ALL THREADS)
   Stmt *ExecuteStmt = nullptr;
@@ -1265,7 +1231,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   
   if (!ExecuteCall.isInvalid()) {
     ExecuteStmt = ExecuteCall.get();
-    llvm::errs() << "[GTaP][Sema] Generated __gtap_execute_task_loop_device call (for all threads)\n";
+    // llvm::errs() << "[GTaP][Sema] Generated __gtap_execute_task_loop_device call (for all threads)\n";
   }
   
   // Access result from task pointer (THREAD 0 ONLY)
@@ -1308,12 +1274,12 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       Expr *ResultAssign = ResultAssignER.get();
       
       ResultStmts.push_back(ResultAssign);
-      llvm::errs() << "[GTaP][Sema] Generated direct result access with local pointer: "
-                   << "d_result = __gtap_task_ptr->__gtap_result\n";
+      // llvm::errs() << "[GTaP][Sema] Generated direct result access with local pointer: "
+      //              << "d_result = __gtap_task_ptr->__gtap_result\n";
     }
   }
   
-  llvm::errs() << "[GTaP][Sema] Device entry code generation complete\n";
+  // llvm::errs() << "[GTaP][Sema] Device entry code generation complete\n";
   
   // Build final statement list:
   // 1. bool __gtap_is_master = (blockIdx.x == 0 && threadIdx.x == 0);
@@ -1409,7 +1375,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       DeclStmt *MasterVarDecl = new (Ctx) DeclStmt(
           DeclGroupRef(MasterVar), StartLoc, EndLoc);
       FinalStmts.push_back(MasterVarDecl);
-      llvm::errs() << "[GTaP][Sema] Created __gtap_is_master variable\n";
+      // llvm::errs() << "[GTaP][Sema] Created __gtap_is_master variable\n";
       
       // DeviceStmts contains all init statements including task pointer declaration
       SmallVector<Stmt *, 16> InitStmts(DeviceStmts.begin(), DeviceStmts.end());
@@ -1440,12 +1406,12 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       );
       
       FinalStmts.push_back(InitIfStmt);
-      llvm::errs() << "[GTaP][Sema] Created first if (__gtap_is_master) block for initialization\n";
+      // llvm::errs() << "[GTaP][Sema] Created first if (__gtap_is_master) block for initialization\n";
       
       // Add execute statement (all threads)
       if (ExecuteStmt) {
         FinalStmts.push_back(ExecuteStmt);
-        llvm::errs() << "[GTaP][Sema] Added execute_task_loop_device call (runs on all threads)\n";
+        // llvm::errs() << "[GTaP][Sema] Added execute_task_loop_device call (runs on all threads)\n";
       }
       
       // Create second if statement for result
@@ -1474,13 +1440,13 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
         );
         
         FinalStmts.push_back(ResultIfStmt);
-        llvm::errs() << "[GTaP][Sema] Created second if (__gtap_is_master) block for result copy\n";
+        // llvm::errs() << "[GTaP][Sema] Created second if (__gtap_is_master) block for result copy\n";
       }
       
       CompoundStmt *FinalBlock = CompoundStmt::Create(
           Ctx, FinalStmts, FPOptionsOverride(), StartLoc, EndLoc);
       
-      llvm::errs() << "[GTaP][Sema] Wrapped device code: bool __gtap_is_master, task decl, if(__gtap_is_master) init, execute all threads, if(__gtap_is_master) result\n";
+      // llvm::errs() << "[GTaP][Sema] Wrapped device code: bool __gtap_is_master, task decl, if(__gtap_is_master) init, execute all threads, if(__gtap_is_master) result\n";
       return StmtResult(FinalBlock);
   }
   
@@ -1518,8 +1484,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     return StmtError();
 
   ASTContext &Ctx = getASTContext();
-  llvm::errs() << "[GTaP][Sema] Enter TransformTaskFunctionBody for function '"
-               << FD->getName() << "'\n";
+  // llvm::errs() << "[GTaP][Sema] Enter TransformTaskFunctionBody for function '"
+  //              << FD->getName() << "'\n";
 
   auto asRValue = [&](Expr *E) -> Expr* {
     if (!E || !E->isGLValue()) return E;
@@ -1540,8 +1506,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   if (!TaskRecord)
     return StmtError();
 
-  llvm::errs() << "[GTaP][Sema]  Created/updated task record '"
-               << TaskRecord->getName() << "'\n";
+  // llvm::errs() << "[GTaP][Sema]  Created/updated task record '"
+  //              << TaskRecord->getName() << "'\n";
 
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
@@ -1642,8 +1608,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   Expr *SwitchCond = buildGetStateFromHeader();
   if (!SwitchCond) {
-    llvm::errs() << "[GTaP][Sema] Warning: State machine disabled (state access not implemented yet)\n";
-    llvm::errs() << "[GTaP][Sema] Generating linearized body as fallback\n";
+    // llvm::errs() << "[GTaP][Sema] Warning: State machine disabled (state access not implemented yet)\n";
+    // llvm::errs() << "[GTaP][Sema] Generating linearized body as fallback\n";
     SmallVector<Stmt *, 2> Fallback = {ChildCountDeclStmt, LinearizedBody};
     return StmtResult(CompoundStmt::Create(Ctx, Fallback, FPOptionsOverride(),
                                            Body->getLBracLoc(),
@@ -1704,7 +1670,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   // result retrieval generation
   auto &SlotsByWait = Transformer.getSlotsByWait();
-  llvm::errs() << "[GTaP][Sema]  SlotsByWait size: " << SlotsByWait.size() << "\n";
+  // llvm::errs() << "[GTaP][Sema]  SlotsByWait size: " << SlotsByWait.size() << "\n";
 
   FunctionDecl *GetChildTaskIdFn = requireRuntimeFunction(SemaRef, "__gtap_get_child_task_id", Body->getBeginLoc());
   FunctionDecl *GetTaskDataFn    = requireRuntimeFunction(SemaRef, "__gtap_get_task_data", Body->getBeginLoc());

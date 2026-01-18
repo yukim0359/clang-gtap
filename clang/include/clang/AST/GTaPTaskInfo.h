@@ -8,6 +8,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/StmtGTaP.h"
+#include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -37,7 +38,8 @@ struct GTaPTaskFunctionInfo {
   std::vector<FieldDecl *> CapturedFields;
   FieldDecl *StateField = nullptr;
   FieldDecl *ResultField = nullptr;
-  llvm::DenseSet<const VarDecl*> NoStageLocalCache;
+  llvm::DenseSet<const VarDecl*> SpillSet;      // taskwait で値を保存すべき
+  llvm::DenseSet<const VarDecl*> HoistOnlySet;  // スコープ維持のため promote だけ
   FunctionDecl *StateMachineFD = nullptr;
   unsigned ReturnThread = 0;  // Thread index for result write guard (when worker_size is block)
 };
@@ -65,6 +67,15 @@ public:
 
     if (BO->isAssignmentOp()) {
       TraverseStmt(BO->getRHS());
+
+      if (BO->isCompoundAssignmentOp()) {
+        if (auto *DRE = dyn_cast<DeclRefExpr>(BO->getLHS()->IgnoreParenImpCasts())) {
+          if (auto *VD = dyn_cast<VarDecl>(DRE->getDecl())) {
+            if (VD->hasLocalStorage() && VD->isLocalVarDecl())
+              UD.Uses.insert(VD);
+          }
+        }
+      }
 
       llvm::SaveAndRestore<bool> SR(InWriteContext, true);
       TraverseStmt(BO->getLHS());
@@ -167,7 +178,7 @@ private:
         if (Def->hasBody()) Body = Def->getBody();
     }
     if (!Body) {
-      llvm::errs() << "[GTaP] No body available for " << TargetFunc->getName() << "\n";
+      // llvm::errs() << "[GTaP] No body available for " << TargetFunc->getName() << "\n";
       return;
     }
   
@@ -186,7 +197,9 @@ private:
     }
   
     if (!HasTaskwait) {
-      llvm::errs() << "[GTaP] No taskwait in " << TargetFunc->getName() << " (skip capture)\n";
+      Result.CapturedVariables.clear();
+      Result.SpillSet.clear();
+      Result.HoistOnlySet.clear();
       return;
     }
   
@@ -194,8 +207,8 @@ private:
     CFG::BuildOptions BO;
     std::unique_ptr<CFG> Cfg = CFG::buildCFG(TargetFunc, Body, &Ctx, BO);
     if (!Cfg) {
-      llvm::errs() << "[GTaP] CFG construction failed for function: "
-                   << TargetFunc->getName() << "\n";
+      // llvm::errs() << "[GTaP] CFG construction failed for function: "
+      //              << TargetFunc->getName() << "\n";
       // Fallback (if there is a taskwait but CFG is not built, capture all local variables safely)
       llvm::SmallPtrSet<const VarDecl *, 16> Seen;
       for (auto *VD : LocalVariables) {
@@ -206,23 +219,24 @@ private:
       return;
     }
 
-    llvm::errs() << "[GTaP] CFG construction succeeded for function: "
-                  << TargetFunc->getName() << "\n";
-    for (const CFGBlock *B : *Cfg) {
-      llvm::errs() << "Block B" << B->getBlockID() << " size=" << B->size() << "\n";
-      if (const Stmt *T = B->getTerminatorStmt())
-        llvm::errs() << "  Terminator=" << T->getStmtClassName() << "\n";
-      // for (const auto &E : *B)
-      //   llvm::errs() << "  ElemKind=" << (int)E.getKind() << "\n";
-      for (const auto &E : *B) {
-        if (auto CS = E.getAs<CFGStmt>()) {
-          const Stmt *S = CS->getStmt();
-          llvm::errs() << "  CFGStmt: " << S->getStmtClassName() << "\n";
-        } else {
-          llvm::errs() << "  ElemKind=" << (int)E.getKind() << "\n";
-        }
-      }
-    }
+    // llvm::errs() << "[GTaP] CFG construction succeeded for function: "
+    //               << TargetFunc->getName() << "\n";
+    // for (const CFGBlock *B : *Cfg) {
+    //   llvm::errs() << "Block B" << B->getBlockID() << " size=" << B->size() << "\n";
+    //   if (const Stmt *T = B->getTerminatorStmt()) {
+    //     llvm::errs() << "  Terminator=" << T->getStmtClassName() << "\n";
+    //   }
+    //   for (const auto &E : *B)
+    //     llvm::errs() << "  ElemKind=" << (int)E.getKind() << "\n";
+    //   for (const auto &E : *B) {
+    //     if (auto CS = E.getAs<CFGStmt>()) {
+    //       const Stmt *S = CS->getStmt();
+    //       llvm::errs() << "  CFGStmt: " << S->getStmtClassName() << "\n";
+    //     } else {
+    //       llvm::errs() << "  ElemKind=" << (int)E.getKind() << "\n";
+    //     }
+    //   }
+    // }
 
     using VarSet = llvm::SmallPtrSet<const VarDecl *, 32>;
 
@@ -286,11 +300,13 @@ private:
 
     struct BlockUD { VarSet Use, Def; };
     llvm::DenseMap<const CFGBlock *, BlockUD> BlockUseDef;
+    llvm::DenseMap<const CFGBlock *, VarSet> BlockMentionGen; // Uses \cup Defs
 
     // (A) Calculate Use/Def for each block (Use is "used before Def in the block")
     for (const CFGBlock *B : *Cfg) {
       if (!B) continue;
       BlockUD BUD;
+      VarSet MG;
       for (const auto &Elem : *B) {
         if (auto CS = Elem.getAs<CFGStmt>()) {
           const Stmt *S = CS->getStmt();
@@ -299,13 +315,17 @@ private:
           // Use += (UD.Uses - BUD.Def)
           for (auto *U : UD.Uses)
             if (!BUD.Def.contains(U)) BUD.Use.insert(U);
-
           // Def += UD.Defs
           for (auto *D : UD.Defs)
             BUD.Def.insert(D);
+
+          // MG += (UD.Uses \cup UD.Defs)
+          for (auto *U : UD.Uses) MG.insert(U);
+          for (auto *D : UD.Defs) MG.insert(D);
         }
       }
       BlockUseDef[B] = std::move(BUD);
+      BlockMentionGen[B] = std::move(MG);
     }
 
     // (B) Liveness: LiveIn/LiveOut by fixed point calculation
@@ -336,33 +356,87 @@ private:
       }
     }
 
-    // (C) Traverse each block from the end, and capture the Live that is "immediately after the taskwait"
-    llvm::SmallPtrSet<const VarDecl *, 32> CapturedSet;
-
-    for (const CFGBlock *B : *Cfg) {
-      if (!B) continue;
-      VarSet Live = LiveOut[B];
-
-      for (auto EI = B->rbegin(); EI != B->rend(); ++EI) {
-        if (auto CS = EI->getAs<CFGStmt>()) {
-          const Stmt *S = CS->getStmt();
-
-          // If a taskwait is encountered, capture the Live that is "immediately after the taskwait"
-          if (isa<GTaPTaskwaitDirective>(S)) {
-            for (auto *V : Live) CapturedSet.insert(V);
-          }
-
-          // Live <- (Live - Def) \cup Use
-          UseDef UD = computeStmtUseDef(S);
-          for (auto *D : UD.Defs) Live.erase(D);
-          for (auto *U : UD.Uses) Live.insert(U);
+    // (B) Calculate MentionGen/MentionKill for each block
+    llvm::DenseMap<const CFGBlock *, VarSet> MentionIn, MentionOut;
+    bool Changed2 = true;
+    while (Changed2) {
+      Changed2 = false;
+      for (const CFGBlock *B : *Cfg) {
+        if (!B) continue;
+    
+        VarSet NewOut;
+        for (auto SI = B->succ_begin(); SI != B->succ_end(); ++SI)
+          if (const CFGBlock *Succ = *SI)
+            unionInto(NewOut, MentionIn[Succ]);
+    
+        VarSet NewIn = NewOut;
+        unionInto(NewIn, BlockMentionGen[B]);
+    
+        if (!setEqual(NewOut, MentionOut[B]) || !setEqual(NewIn, MentionIn[B])) {
+          MentionOut[B] = std::move(NewOut);
+          MentionIn[B]  = std::move(NewIn);
+          Changed2 = true;
         }
       }
     }
 
-    // (D) Reflect the result
-    for (auto *VD : CapturedSet)
-      Result.CapturedVariables.push_back(const_cast<VarDecl *>(VD));
+    // (C) Traverse each block from the end, and capture the Live that is "immediately after the taskwait"
+    SourceManager &SM = Ctx.getSourceManager();
+    auto before = [&](SourceLocation A, SourceLocation B) -> bool {
+      if (A.isInvalid() || B.isInvalid()) return false;
+      A = SM.getSpellingLoc(A);
+      B = SM.getSpellingLoc(B);
+      return SM.isBeforeInTranslationUnit(A, B);
+    };
+    
+    llvm::SmallPtrSet<const VarDecl *, 32> SpillSetLocal;
+    llvm::SmallPtrSet<const VarDecl *, 32> HoistOnlyLocal;
+    
+    for (const CFGBlock *B : *Cfg) {
+      if (!B) continue;
+      VarSet Live = LiveOut[B];
+      VarSet Mention = MentionOut[B];
+    
+      for (auto EI = B->rbegin(); EI != B->rend(); ++EI) {
+        if (auto CS = EI->getAs<CFGStmt>()) {
+          const Stmt *S = CS->getStmt();
+          if (auto *TW = dyn_cast<GTaPTaskwaitDirective>(S)) {
+            for (auto *V : Live) SpillSetLocal.insert(V);
+    
+            SourceLocation TWLoc = TW->getBeginLoc();
+            for (auto *V : Mention) {
+              SourceLocation DLoc = V->getBeginLoc();
+              if (before(DLoc, TWLoc))
+                HoistOnlyLocal.insert(V);
+            }
+          }
+    
+          UseDef UD = computeStmtUseDef(S);
+    
+          // Live <- (Live - Def) \cup Use
+          for (auto *D : UD.Defs) Live.erase(D);
+          for (auto *U : UD.Uses) Live.insert(U);
+    
+          // Mention <- Mention \cup (Uses \cup Defs)
+          for (auto *U : UD.Uses) Mention.insert(U);
+          for (auto *D : UD.Defs) Mention.insert(D);
+        }
+      }
+    }
+
+    Result.SpillSet.clear();
+    Result.HoistOnlySet.clear();
+    Result.CapturedVariables.clear();
+    
+    for (auto *V : SpillSetLocal) Result.SpillSet.insert(V);
+    for (auto *V : HoistOnlyLocal) Result.HoistOnlySet.insert(V);
+    
+    // Captured = union
+    llvm::SmallPtrSet<const VarDecl*, 32> Union;
+    for (auto *V : SpillSetLocal) Union.insert(V);
+    for (auto *V : HoistOnlyLocal) Union.insert(V);
+    for (auto *VD : Union)
+      Result.CapturedVariables.push_back(const_cast<VarDecl*>(VD));
   }
 
   ASTContext &Ctx;
