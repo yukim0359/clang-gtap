@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
 #define MAX_TASK_SIZE 16
-#include "task_api_all.cuh"
+#include "gtap_thread.cuh"
 
 __device__ int d_result;
 
@@ -18,27 +18,17 @@ __device__ void sub() {
 #pragma gtap function worker_size(thread)
 __device__ void for_task() {
     d_result = 0;
-    for (int i = 0; i < 2; i++) {
-        int hoge = 0;
-        while (hoge < 4) {
+    {
+        // int j = i;
+        int j = 0;
+        int x = 0;
+        #pragma gtap task
+        add();
+        #pragma gtap taskwait
+        if (j < 1) {
             #pragma gtap task
             add();
             #pragma gtap taskwait
-            {
-                #pragma gtap task
-                add();
-                #pragma gtap taskwait
-            }
-            if (hoge < 3) {
-                #pragma gtap task
-                add();
-                #pragma gtap taskwait
-            } else {
-                #pragma gtap task
-                sub();
-                #pragma gtap taskwait
-            }
-            hoge++;
         }
     }
 }
@@ -50,7 +40,7 @@ __global__ void my_kernel() {
 
 int main() {
     // #pragma gtap init
-    cudaError_t err = __gtap_init_task_runtime();
+    cudaError_t err = gtap_initialize();
     if (err != cudaSuccess) {
         printf("Error: __gtap_init_task_runtime failed\n");
         return 1;
@@ -60,7 +50,7 @@ int main() {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
-    my_kernel<<<NUM_BLOCKS, THREADS_PER_BLK>>>();
+    my_kernel<<<GTAP_GRID_SIZE, GTAP_BLOCK_SIZE>>>();
     cudaEventRecord(stop);
     cudaDeviceSynchronize();
     cudaEventSynchronize(stop);

@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
-#include "task_api_all.cuh"
+#include "gtap_block.cuh"
 
 #define DATA_LENGTH 2048
 

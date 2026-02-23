@@ -1557,6 +1557,10 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   Expr *ChildCountZero = IntegerLiteral::Create(
       Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
   ChildCountVar->setInit(ChildCountZero);
+  // If __GTAP_WORKER_IS_BLOCK is defined, declare __gtap_child_count as shared
+  if (isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK")) {
+    ChildCountVar->addAttr(CUDASharedAttr::CreateImplicit(Ctx));
+  }
   DeclStmt *ChildCountDeclStmt =
       new (Ctx) DeclStmt(DeclGroupRef(ChildCountVar), SourceLocation(), SourceLocation());
 

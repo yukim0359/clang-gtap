@@ -47,7 +47,6 @@ echo "[step 1/4] Device front-end only (syntax check)..."
   -DMAX_TASKS_PER_WARP="${MAX_TASKS_PER_WARP}" -DMAX_CHILD_TASKS="${MAX_CHILD_TASKS}" \
   -DTASK_KIND="${TASK_KIND}" \
   -DGTAP_TERMINATE_ON_FIRST_TASK_FINISH \
-  -D__CUDACC__ \
   "${SRC}" > "${OUT_DIR}/device_syntax_only.log" 2>&1 || {
   echo "[error] Device syntax-only check failed"
   exit 1
@@ -62,7 +61,6 @@ echo "[step 2/4] Host front-end only (syntax check)..."
   -DMAX_TASKS_PER_WARP="${MAX_TASKS_PER_WARP}" -DMAX_CHILD_TASKS="${MAX_CHILD_TASKS}" \
   -DTASK_KIND="${TASK_KIND}" \
   -DGTAP_TERMINATE_ON_FIRST_TASK_FINISH \
-  -D__CUDACC__ \
   "${SRC}" > "${OUT_DIR}/host_syntax_only.log" 2>&1 || {
   echo "[warn] Host syntax-only check failed"
 }

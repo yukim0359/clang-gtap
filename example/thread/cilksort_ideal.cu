@@ -6,8 +6,8 @@
 #include <limits>
 #include <cuda_runtime.h>
 // #define DEBUG
-#define MAX_TASK_SIZE 48
-#include "task_api_all.cuh"
+#define GTAP_MAX_TASK_DATA_SIZE 48
+#include "gtap_thread.cuh"
 
 #define TASK_SPAWN_CUTOFF_SORT 64
 #define TASK_SPAWN_CUTOFF_MERGE 256
@@ -157,10 +157,10 @@ __device__ void sort_task(int* arr, int n, int* tmp) {
     sort_task(arr + len12 + len3, len4, tmp + len12 + len3);
     #pragma gtap taskwait
 
-    len12 = n / 2;
+    // len12 = n / 2;
     // len1 = len12 / 2;
     // len2 = len12 - len1;
-    len34 = n - len12;
+    // len34 = n - len12;
     // len3 = len34 / 2;
     // len4 = len34 - len3;
 
@@ -170,8 +170,8 @@ __device__ void sort_task(int* arr, int n, int* tmp) {
     merge_task(arr + len12, len3, arr + len12 + len3, len4, tmp + len12);
     #pragma gtap taskwait
 
-    len12 = n / 2;
-    len34 = n - len12;
+    // len12 = n / 2;
+    // len34 = n - len12;
 
     #pragma gtap task
     merge_task(tmp, len12, tmp + len12, len34, arr);
@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
-    my_kernel<<<NUM_BLOCKS, THREADS_PER_BLK>>>(static_cast<int>(N));
+    my_kernel<<<GTAP_GRID_SIZE, GTAP_BLOCK_SIZE>>>(static_cast<int>(N));
     cudaDeviceSynchronize();
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);

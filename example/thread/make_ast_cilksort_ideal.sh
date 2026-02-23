@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJ_DIR="/work/gc64/c64099"
+PROJ_DIR="/work/gc64/c64099/gtap"
 CLANG_BIN="${PROJ_DIR}/clang-gtap/build/bin/clang"
 SRC_DIR="${PROJ_DIR}/clang-gtap/example/thread"
 OUT_DIR="${SRC_DIR}/out"
@@ -17,8 +17,7 @@ mkdir -p "${OUT_DIR}"
   -fsyntax-only \
   -Xclang -ast-dump \
   -Xclang -ast-dump-filter=_task \
-  -I"${PROJ_DIR}/gpu-task-runtime/thread/include" \
-  -I"${PROJ_DIR}/gpu-task-runtime/common" \
+  -I"${PROJ_DIR}/runtime" \
   -D__CUDACC__ \
   "${SRC_DIR}/cilksort_ideal.cu" \
   > "${OUT_DIR}/cilksort_ideal_ast_device.txt" 2>&1

@@ -30,7 +30,7 @@ int main() {
     // #pragma gtap init
     cudaError_t err = __gtap_init_task_runtime();
     if (err != cudaSuccess) {
-        printf("Error: __gtap_init_task_runtime failed\n");
+        printf("Error: %d\n", err);
         return 1;
     }
 
