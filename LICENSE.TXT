@@ -1,4 +1,10 @@
 ==============================================================================
+clang-gtap is based on the LLVM Project and is under the Apache License v2.0
+with LLVM Exceptions. The full license text is below and is also available at
+https://llvm.org/LICENSE.txt
+==============================================================================
+
+==============================================================================
 The LLVM Project is under the Apache License v2.0 with LLVM Exceptions:
 ==============================================================================
 

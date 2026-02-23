@@ -1,0 +1,19 @@
+clang-gtap: GTaP (GPU Task Parallelism) support for Clang
+=========================================================
+
+This project is a derivative of the LLVM Project.
+
+The LLVM Project
+----------------
+Copyright (c) 2003-present, LLVM Project and its contributors.
+All rights reserved.
+
+LLVM is open source software under the Apache License v2.0 with LLVM Exceptions.
+See the file LICENSE.TXT in this distribution and https://llvm.org/LICENSE.txt.
+
+  https://llvm.org/
+  https://github.com/llvm/llvm-project
+
+Third-party code included in the LLVM Project is identified in separate
+directory trees or at the top of individual files. See llvm/LICENSE.TXT
+and the LLVM documentation for details.
