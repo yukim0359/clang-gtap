@@ -1557,7 +1557,7 @@ def : MutualExclusions<[CUDAGlobal, CUDAHost]>;
 def GTaPFunction : InheritableAttr {
   let Spellings = [];
   let Subjects = SubjectList<[Function]>;
-  let Args = [StringArgument<"WorkerSize">];
+  let Args = [];
   let Documentation = [Undocumented];
   let LangOpts = [CUDA];
 }

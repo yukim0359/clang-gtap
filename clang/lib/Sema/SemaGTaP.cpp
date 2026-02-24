@@ -1465,8 +1465,7 @@ void SemaGTaP::ActOnStartOfFunctionDef(FunctionDecl *FD) {
   // Check if there is a pending GTaP function pragma
   if (hasPendingGTaPFunctionPragma()) {
     // Attach GTaPFunctionAttr to this function
-    StringRef WorkerSize = getPendingGTaPFunctionWorkerSize();
-    FD->addAttr(GTaPFunctionAttr::Create(getASTContext(), WorkerSize, 
+    FD->addAttr(GTaPFunctionAttr::Create(getASTContext(),
                                          PendingFunctionPragmaLoc));
     
     // Save return_thread to task info

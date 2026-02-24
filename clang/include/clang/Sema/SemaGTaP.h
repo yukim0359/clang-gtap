@@ -84,25 +84,17 @@ public:
 
   // Check if there is a pending GTaP function pragma
   bool hasPendingGTaPFunctionPragma() const {
-    return !PendingFunctionWorkerSize.empty();
-  }
-
-  // Get the pending GTaP function pragma worker size
-  StringRef getPendingGTaPFunctionWorkerSize() const {
-    return PendingFunctionWorkerSize;
+    return PendingFunctionPragmaLoc.isValid();
   }
 
   // Clear the pending GTaP function pragma
   void clearPendingGTaPFunctionPragma() {
-    PendingFunctionWorkerSize = StringRef();
     PendingFunctionPragmaLoc = SourceLocation();
     PendingFunctionReturnThread = 0;
   }
 
-  // Pending function pragma: stores worker_size for the next function declaration
-  // This is set by #pragma gtap function at file scope
+  // Pending function pragma: set by #pragma gtap function at file scope
   // Made public so PragmaHandler can set it directly
-  StringRef PendingFunctionWorkerSize;
   SourceLocation PendingFunctionPragmaLoc;
   unsigned PendingFunctionReturnThread = 0;
 

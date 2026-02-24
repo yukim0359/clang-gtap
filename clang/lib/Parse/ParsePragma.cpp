@@ -282,56 +282,40 @@ private:
     Token Tok;
     // 'function' token was already consumed by HandlePragma
     PP.Lex(Tok); // Get next token
-    
-    // Expect: worker_size(identifier)
-    if (!Tok.is(tok::identifier) || Tok.getIdentifierInfo()->getName() != "worker_size") {
-      PP.Diag(Tok.getLocation(), diag::err_expected) << "worker_size";
-      return;
-    }
-    PP.Lex(Tok); // Consume 'worker_size'
-    
-    if (!Tok.is(tok::l_paren)) {
-      PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
-      return;
-    }
-    PP.Lex(Tok); // Consume '('
-    
-    if (!Tok.is(tok::identifier)) {
-      PP.Diag(Tok.getLocation(), diag::err_expected) << "identifier";
-      return;
-    }
-    
-    // Get the worker size identifier (e.g., "thread" or "block")
-    StringRef WorkerSize = Tok.getIdentifierInfo()->getName();
-    PP.Lex(Tok); // Consume identifier
-    
-    if (!Tok.is(tok::r_paren)) {
-      PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
-      return;
-    }
-    PP.Lex(Tok); // consume ')', now Tok is next token after worker_size(...)
 
     // Optional: return_thread(<int>)  (only when __GTAP_WORKER_IS_BLOCK is defined)
     bool HasReturnThread = false;
     int64_t ReturnThread = 0;
-    SourceLocation ReturnThreadLoc;
 
     while (Tok.is(tok::identifier)) {
       StringRef Name = Tok.getIdentifierInfo()->getName();
 
+      if (Name == "worker_size") {
+        // Optional backward-compatible clause: worker_size(thread|block).
+        // The value is ignored; worker type is determined by __GTAP_WORKER_IS_THREAD|BLOCK.
+        PP.Lex(Tok); // consume 'worker_size'
+        if (!Tok.is(tok::l_paren)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
+          return;
+        }
+        PP.Lex(Tok); // consume '('
+        if (!Tok.is(tok::identifier)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << "identifier";
+          return;
+        }
+        PP.Lex(Tok); // consume 'thread' or 'block'
+        if (!Tok.is(tok::r_paren)) {
+          PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
+          return;
+        }
+        PP.Lex(Tok); // consume ')'
+        continue;
+      }
+
       if (Name == "return_thread") {
-        ReturnThreadLoc = Tok.getLocation();
         if (!isBlockWorkerMacroDefined(PP)) {
           PP.Diag(Tok.getLocation(), diag::err_expected)
               << "return_thread requires __GTAP_WORKER_IS_BLOCK";
-          // consume until eod for recovery
-          while (!Tok.is(tok::eod)) PP.Lex(Tok);
-          return;
-        }
-
-        if (WorkerSize != "block") {
-          PP.Diag(Tok.getLocation(), diag::err_expected)
-              << "return_thread is only valid with worker_size(block)";
           while (!Tok.is(tok::eod)) PP.Lex(Tok);
           return;
         }
@@ -358,7 +342,7 @@ private:
           PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
           return;
         }
-        PP.Lex(Tok); // consume ')', now Tok is next
+        PP.Lex(Tok); // consume ')'
 
         HasReturnThread = true;
         ReturnThread = V;
@@ -367,14 +351,13 @@ private:
       // Unknown clause name -> stop and let "extra tokens" warning handle it
       break;
     }
-    
+
     // Expect end of pragma
     if (!Tok.is(tok::eod)) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_extra_tokens_at_eol) << "gtap function";
       return;
     }
-    
-    Actions.GTaP().PendingFunctionWorkerSize = WorkerSize;
+
     Actions.GTaP().PendingFunctionPragmaLoc = PragmaLoc;
     if (HasReturnThread) {
       Actions.GTaP().PendingFunctionReturnThread = ReturnThread;
