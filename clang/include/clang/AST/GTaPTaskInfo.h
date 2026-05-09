@@ -36,8 +36,10 @@ struct GTaPTaskFunctionInfo {
   RecordDecl *TaskRecord = nullptr;
   std::vector<FieldDecl *> ParameterFields;
   std::vector<FieldDecl *> CapturedFields;
+  std::vector<FieldDecl *> ChildTidFields;
   FieldDecl *StateField = nullptr;
   FieldDecl *ResultField = nullptr;
+  unsigned ScalarResultTaskCount = 0;
   llvm::DenseSet<const VarDecl*> SpillSet;
   llvm::DenseSet<const VarDecl*> HoistOnlySet;
   FunctionDecl *StateMachineFD = nullptr;

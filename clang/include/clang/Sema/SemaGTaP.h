@@ -12,6 +12,7 @@
 #include "clang/Sema/SemaBase.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include <cstdint>
 
 namespace clang {
 class ASTContext;
@@ -137,6 +138,9 @@ public:
                                                 QualType IntTy,
                                                 QualType TaskCtxPtrTy);
 
+  /// Record the largest generated task-data record size in this translation unit.
+  void noteTaskRecordSize(uint64_t Bytes);
+
 private:
   // Get the AST context.
   ASTContext &getASTContext();
@@ -146,6 +150,9 @@ private:
 
   /// Cache of analysed task functions, keyed by the original declaration.
   llvm::DenseMap<const FunctionDecl *, GTaPTaskFunctionInfo> CachedTaskInfos;
+
+  uint64_t AutoTaskDataSize = 1;
+  VarDecl *AutoTaskDataSizeDecl = nullptr;
 };
 
 }
