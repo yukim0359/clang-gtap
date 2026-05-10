@@ -89,6 +89,53 @@ static QualType lookupNamedType(Sema &S, StringRef Name) {
   return QualType();
 }
 
+static uint64_t getMacroIntegerValue(Sema &S, StringRef Name, uint64_t Default) {
+  Preprocessor &PP = S.getPreprocessor();
+  IdentifierInfo *II = PP.getIdentifierInfo(Name);
+  if (!II)
+    return Default;
+  MacroInfo *MI = PP.getMacroInfo(II);
+  if (!MI || MI->getNumTokens() != 1)
+    return Default;
+
+  const Token &Tok = MI->tokens().front();
+  if (!Tok.is(tok::numeric_constant))
+    return Default;
+
+  SmallString<32> Spelling;
+  bool Invalid = false;
+  StringRef Text = PP.getSpelling(Tok, Spelling, &Invalid);
+  uint64_t Value = Default;
+  if (!Invalid && !Text.getAsInteger(0, Value))
+    return Value;
+  return Default;
+}
+
+static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
+  ASTContext &Ctx = S.getASTContext();
+  IdentifierInfo &ThreadIdxId = Ctx.Idents.get("threadIdx");
+  DeclContext::lookup_result ThreadIdxLookup =
+      Ctx.getTranslationUnitDecl()->lookup(&ThreadIdxId);
+  if (ThreadIdxLookup.empty())
+    return nullptr;
+
+  auto *ThreadIdxVar = dyn_cast<VarDecl>(ThreadIdxLookup.front());
+  if (!ThreadIdxVar)
+    return nullptr;
+
+  Expr *ThreadIdxRef = DeclRefExpr::Create(
+      Ctx, NestedNameSpecifierLoc(), Loc, ThreadIdxVar,
+      false, Loc, ThreadIdxVar->getType(), VK_LValue);
+
+  CXXScopeSpec SS;
+  IdentifierInfo &XId = Ctx.Idents.get("x");
+  DeclarationNameInfo XNameInfo(&XId, Loc);
+  ExprResult ThreadIdxX = S.BuildMemberReferenceExpr(
+      ThreadIdxRef, ThreadIdxVar->getType(), Loc, false, SS,
+      SourceLocation(), nullptr, XNameInfo, nullptr, nullptr);
+  return ThreadIdxX.isInvalid() ? nullptr : ThreadIdxX.get();
+}
+
 static bool getGTaPMaxTaskSizeFromConstexpr(Sema &S, SourceLocation Loc,
                                           uint64_t &Out) {
   ASTContext &Ctx = S.getASTContext();
@@ -174,6 +221,8 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
   ASTContext &Ctx = S.getASTContext();
   FieldMap.clear();
+  const bool IsBlockWorker = isMacroDefined(S, "__GTAP_WORKER_IS_BLOCK");
+  const uint64_t WorkerSize = getMacroIntegerValue(S, "GTAP_BLOCK_SIZE", 1);
 
   auto addField = [&](RecordDecl *RD, StringRef Name, QualType QT) -> FieldDecl * {
     IdentifierInfo &FieldId = Ctx.Idents.get(Name);
@@ -213,7 +262,13 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       if (!VD)
         continue;
       std::string FieldName = "__cap_" + VD->getName().str();
-      FieldDecl *Field = addField(RD, FieldName, VD->getType());
+      QualType FieldTy = VD->getType();
+      if (IsBlockWorker) {
+        FieldTy = Ctx.getConstantArrayType(
+            FieldTy, llvm::APInt(64, WorkerSize), nullptr,
+            ArraySizeModifier::Normal, 0);
+      }
+      FieldDecl *Field = addField(RD, FieldName, FieldTy);
       TaskInfo.CapturedFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(VD->getCanonicalDecl())] = Field;
     }
@@ -312,9 +367,7 @@ public:
       return Base::TransformDeclRefExpr(DRE);
     }
     FieldDecl *Field = It->second;
-    Expr *SelfExpr = B.buildSelfRef();
-
-    ExprResult MemberER = B.buildFieldAccess(SelfExpr, true, Field, DRE->getExprLoc());
+    ExprResult MemberER = buildCapturedFieldAccess(Field, DRE->getExprLoc());
     if (MemberER.isInvalid()) return ExprError();
     Expr *Member = MemberER.get();
 
@@ -358,7 +411,7 @@ public:
         if (!NewInitExpr) {
           continue;
         }
-        ExprResult LHSER = B.buildFieldAccess(B.buildSelfRef(), true, Field, SourceLocation());
+        ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
         if (LHSER.isInvalid()) return StmtError();
         Expr *LHS = LHSER.get();
         ExprResult Assign = SemaRef.BuildBinOp(
@@ -564,6 +617,8 @@ public:
       }
       
       QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(CalleeTaskRecord));
+      const bool IsBlockWorker =
+          isMacroDefined(Base::getSema(), "__GTAP_WORKER_IS_BLOCK");
       QualType VoidTy = Ctx.VoidTy;
       QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
       QualType IntTy = Ctx.IntTy;
@@ -633,13 +688,22 @@ public:
       Expr *StateMachinePtr = ImplicitCastExpr::Create(
           Ctx, StateMachinePtrTy, CK_FunctionToPointerDecay, StateMachineRef, nullptr, VK_PRValue, FPOptionsOverride());
       
-      // Build child_count address
-      Expr *ChildCountRef = DeclRefExpr::Create(
-          Ctx, NestedNameSpecifierLoc(), SourceLocation(), ChildCountVar,
-          false, SourceLocation(), IntTy, VK_LValue);
-      Expr *ChildCountAddr = UnaryOperator::Create(
-          Ctx, ChildCountRef, UO_AddrOf, IntPtrTy, VK_PRValue,
-          OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
+      Expr *ChildCountArg = nullptr;
+      if (IsBlockWorker) {
+        ChildCountArg = CStyleCastExpr::Create(
+            Ctx, IntPtrTy, VK_PRValue, CK_NullToPointer,
+            IntegerLiteral::Create(Ctx, llvm::APInt(64, 0), Ctx.IntTy,
+                                   SourceLocation()),
+            nullptr, FPOptionsOverride(), Ctx.getTrivialTypeSourceInfo(IntPtrTy),
+            SourceLocation(), SourceLocation());
+      } else {
+        Expr *ChildCountRef = DeclRefExpr::Create(
+            Ctx, NestedNameSpecifierLoc(), SourceLocation(), ChildCountVar,
+            false, SourceLocation(), IntTy, VK_LValue);
+        ChildCountArg = UnaryOperator::Create(
+            Ctx, ChildCountRef, UO_AddrOf, IntPtrTy, VK_PRValue,
+            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
+      }
 
       FieldDecl *ChildTidField = nullptr;
       if (ResultVar && ResultHandleOrdinal < ChildTidFields.size()) {
@@ -708,7 +772,7 @@ public:
       SmallVector<Expr *, 7> SpawnArgs;
       SpawnArgs.push_back(buildParamRValue(CtxParam));      // ctx
       SpawnArgs.push_back(buildParamRValue(TidParam));      // self_tid
-      SpawnArgs.push_back(ChildCountAddr);                   // child_count
+      SpawnArgs.push_back(ChildCountArg);                    // child_count
       SpawnArgs.push_back(StateMachinePtr);                  // func
       SpawnArgs.push_back(QueueArg);                         // queue_idx
       SpawnArgs.push_back(ChildTidOutArg);                   // out_tid
@@ -965,6 +1029,25 @@ private:
                                     Ctx.IntTy, SourceLocation());
     return toRValue(buildDeclRefLValue(P));
   };
+
+  ExprResult buildCapturedFieldAccess(FieldDecl *Field,
+                                      SourceLocation Loc = SourceLocation()) {
+    ExprResult MemberER = B.buildFieldAccess(B.buildSelfRef(), true, Field, Loc);
+    if (MemberER.isInvalid())
+      return ExprError();
+
+    Expr *Member = MemberER.get();
+    if (!Ctx.getAsConstantArrayType(Field->getType()))
+      return Member;
+
+    Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, Loc);
+    if (!ThreadIdxX)
+      return ExprError();
+
+    Expr *Args[] = {ThreadIdxX};
+    return SemaRef.ActOnArraySubscriptExpr(
+        nullptr, Member, Loc, MultiExprArg(Args, 1), Loc);
+  }
 
   ASTContext &Ctx;
   VarDecl *SelfDecl;
@@ -1714,6 +1797,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType IntTy = Ctx.IntTy;
+  const bool IsBlockWorker = isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
 
   QualType TaskCtxPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType TaskCtxTy = lookupNamedType(SemaRef, "TaskContext");
@@ -1751,20 +1835,20 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   DeclStmt *SelfTypedDeclStmt = 
     new (Ctx) DeclStmt(DeclGroupRef(SelfTypedVar), SourceLocation(), SourceLocation());
 
-  // child_count
-  IdentifierInfo &ChildCountId = Ctx.Idents.get("__gtap_child_count");
-  VarDecl *ChildCountVar = VarDecl::Create(
-      Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &ChildCountId, IntTy,
-      Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
-  Expr *ChildCountZero = IntegerLiteral::Create(
-      Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
-  ChildCountVar->setInit(ChildCountZero);
-  // If __GTAP_WORKER_IS_BLOCK is defined, declare __gtap_child_count as shared
-  if (isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK")) {
-    ChildCountVar->addAttr(CUDASharedAttr::CreateImplicit(Ctx));
+  VarDecl *ChildCountVar = nullptr;
+  DeclStmt *ChildCountDeclStmt = nullptr;
+  if (!IsBlockWorker) {
+    IdentifierInfo &ChildCountId = Ctx.Idents.get("__gtap_child_count");
+    ChildCountVar = VarDecl::Create(
+        Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &ChildCountId,
+        IntTy, Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
+    Expr *ChildCountZero = IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
+    ChildCountVar->setInit(ChildCountZero);
+    ChildCountDeclStmt =
+        new (Ctx) DeclStmt(DeclGroupRef(ChildCountVar), SourceLocation(),
+                           SourceLocation());
   }
-  DeclStmt *ChildCountDeclStmt =
-      new (Ctx) DeclStmt(DeclGroupRef(ChildCountVar), SourceLocation(), SourceLocation());
 
   // finish fn
   FunctionDecl *FinishFn = requireRuntimeFunction(SemaRef, "__gtap_finish_task", Body->getBeginLoc());
@@ -1817,7 +1901,10 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   if (!SwitchCond) {
     // llvm::errs() << "[GTaP][Sema] Warning: State machine disabled (state access not implemented yet)\n";
     // llvm::errs() << "[GTaP][Sema] Generating linearized body as fallback\n";
-    SmallVector<Stmt *, 2> Fallback = {ChildCountDeclStmt, LinearizedBody};
+    SmallVector<Stmt *, 3> Fallback;
+    if (ChildCountDeclStmt)
+      Fallback.push_back(ChildCountDeclStmt);
+    Fallback.push_back(LinearizedBody);
     return StmtResult(CompoundStmt::Create(Ctx, Fallback, FPOptionsOverride(),
                                            Body->getLBracLoc(),
                                            Body->getRBracLoc()));
@@ -1828,11 +1915,18 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
                          SourceLocation(), SourceLocation());
 
   // set_state_for_join call
-  FunctionDecl *SetStateForJoinFn = requireRuntimeFunction(SemaRef, "__gtap_set_state_for_join", Body->getBeginLoc());
+  FunctionDecl *SetStateForJoinFn = requireRuntimeFunction(
+      SemaRef,
+      IsBlockWorker ? "__gtap_set_state_for_join_block" : "__gtap_set_state_for_join",
+      Body->getBeginLoc());
   if (!SetStateForJoinFn)
     return StmtError();
 
   auto buildChildCountRValue = [&]() -> Expr* {
+    if (!ChildCountVar)
+      return IntegerLiteral::Create(
+          Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy,
+          SourceLocation());
     Expr *LV = DeclRefExpr::Create(
         Ctx, NestedNameSpecifierLoc(), SourceLocation(),
         ChildCountVar, /*RefersToEnclosingVariableOrCapture=*/false,
@@ -1853,10 +1947,11 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       return E;
     };
     
-    // args: (tid, child_count, next_state, queue)
+    // args: (tid, child_count_or_ctx, next_state, queue)
     SmallVector<Expr*, 4> Args;
     Args.push_back(asRValue(buildParamLValue(TidParam)));
-    Args.push_back(buildChildCountRValue());
+    Args.push_back(IsBlockWorker ? asRValue(buildParamLValue(CtxParam))
+                                  : buildChildCountRValue());
     Args.push_back(IntegerLiteral::Create(
         Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), NextState),
         Ctx.IntTy, SourceLocation()));
@@ -1873,6 +1968,26 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     if (Call.isInvalid())
       return nullptr;
     return Call.get();
+  };
+
+  auto appendSetStateForJoin = [&](SmallVectorImpl<Stmt *> &Out,
+                                   unsigned NextState, Expr *QueueExpr) {
+    Stmt *SetState = buildSetStateForJoinCall(NextState, QueueExpr);
+    if (!SetState)
+      return;
+
+    Stmt *Return =
+        ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr);
+    Expr *Cond = dyn_cast<Expr>(SetState);
+    if (!Cond) {
+      Out.push_back(SetState);
+      Out.push_back(Return);
+      return;
+    }
+    Out.push_back(IfStmt::Create(
+        Ctx, SourceLocation(), IfStatementKind::Ordinary,
+        nullptr, nullptr, Cond, SourceLocation(), SourceLocation(),
+        Return, SourceLocation(), nullptr));
   };
 
   // result retrieval generation
@@ -1914,6 +2029,25 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       return nullptr;
     return Call.get();
   };
+
+  auto buildStateMachineCapturedFieldAccess =
+    [&](FieldDecl *Field, SourceLocation Loc = SourceLocation()) -> ExprResult {
+      ExprResult MemberER = B.buildFieldAccess(B.buildSelfRef(), true, Field, Loc);
+      if (MemberER.isInvalid())
+        return ExprError();
+
+      Expr *Member = MemberER.get();
+      if (!Ctx.getAsConstantArrayType(Field->getType()))
+        return Member;
+
+      Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, Loc);
+      if (!ThreadIdxX)
+        return ExprError();
+
+      Expr *Args[] = {ThreadIdxX};
+      return SemaRef.ActOnArraySubscriptExpr(
+          nullptr, Member, Loc, MultiExprArg(Args, 1), Loc);
+    };
 
   auto generateResultRetrievalForSlots =
     [&](ArrayRef<GTaPTaskBodyTransformer::TaskResultSlot> Slots) -> SmallVector<Stmt*, 8> {
@@ -2089,7 +2223,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       const auto *Canon = dyn_cast<ValueDecl>(Slot.LHSDecl->getCanonicalDecl());
       if (auto FM = FieldMap.find(Canon); FM != FieldMap.end()) {
         FieldDecl *Field = FM->second;
-        ExprResult LHSER = B.buildFieldAccess(B.buildSelfRef(), true, Field, SourceLocation());
+        ExprResult LHSER =
+            buildStateMachineCapturedFieldAccess(Field, SourceLocation());
         if (LHSER.isInvalid()) return {};
         LHS = LHSER.get();
       } else {
@@ -2237,9 +2372,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
           registerCase(ResumeCase);
 
           // at taskwait position:
-          if (Stmt *SetState = buildSetStateForJoinCall(resumeState, TW->getQueueExpr()))
-            out.push_back(SetState);
-          out.push_back(ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr));
+          appendSetStateForJoin(out, resumeState, TW->getQueueExpr());
           out.push_back(ResumeCase);
 
           return CompoundStmt::Create(Ctx, out, FPOptionsOverride(),
@@ -2345,9 +2478,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     // (C) stage end: set_state + return if top-level taskwait exists
     if (St.EndWaitId >= 0) {
       const unsigned nextState = (unsigned)(St.EndWaitId + 1);
-      if (Stmt *SetState = buildSetStateForJoinCall(nextState, St.EndQueueExpr))
-        CaseStmts.push_back(SetState);
-      CaseStmts.push_back(ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr));
+      appendSetStateForJoin(CaseStmts, nextState, St.EndQueueExpr);
     } else {
       // last stage: guarantee finish + return
       appendFinishAndReturnIfNeeded(CaseStmts);
@@ -2411,7 +2542,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // State machine function body
   SmallVector<Stmt *, 4> Statements;
   Statements.push_back(SelfTypedDeclStmt);
-  Statements.push_back(ChildCountDeclStmt);
+  if (ChildCountDeclStmt)
+    Statements.push_back(ChildCountDeclStmt);
   Statements.push_back(Switch);
   Statements.push_back(ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr));
 
