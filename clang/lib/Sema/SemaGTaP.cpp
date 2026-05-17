@@ -1157,9 +1157,13 @@ StmtResult SemaGTaP::ActOnGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc
 StmtResult SemaGTaP::ActOnGTaPTaskwaitDirective(SourceLocation StartLoc,
                                               SourceLocation EndLoc,
                                               Expr *QueueExpr) {
+  if (isMacroDefined(SemaRef, "GTAP_ASSUME_NO_TASKWAIT")) {
+    SemaRef.Diag(StartLoc, diag::err_gtap_taskwait_with_no_taskwait);
+    return StmtError();
+  }
+
   ASTContext &Ctx = getASTContext();
   Expr *Q = QueueExpr ? QueueExpr : defaultQueueExpr(Ctx, StartLoc);
-  // TODO: Add semantic checks here.
 
   return GTaPTaskwaitDirective::Create(getASTContext(), StartLoc, EndLoc, Q);
 }

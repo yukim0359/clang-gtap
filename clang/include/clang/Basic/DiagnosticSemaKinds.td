@@ -177,6 +177,8 @@ def err_gtap_task_record_too_large : Error<
   "gtap task data size (%0 bytes) exceeds '__gtap_max_task_size' (%1 bytes)">;
 def err_gtap_runtime_function_not_found : Error<
   "runtime function '%0' not found; ensure GTaP runtime is properly linked">;
+def err_gtap_taskwait_with_no_taskwait : Error<
+  "#pragma gtap taskwait cannot be used when GTAP_ASSUME_NO_TASKWAIT is defined">;
 def err_gtap_entry_invalid_statement : Error<
   "#pragma gtap entry must be followed by a function call or assignment with function call">;
 def err_gtap_entry_no_callee : Error<
