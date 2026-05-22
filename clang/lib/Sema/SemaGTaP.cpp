@@ -19,6 +19,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 
 using namespace clang;
 
@@ -242,6 +243,25 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         &RecordId);
     RD->startDefinition();
 
+    std::unordered_map<std::string, unsigned> UsedFieldNames;
+    auto makeUniqueFieldName = [&](std::string Base) -> std::string {
+      if (Base.empty())
+        Base = "__gtap_field";
+
+      unsigned &Next = UsedFieldNames[Base];
+      if (Next == 0) {
+        Next = 1;
+        return Base;
+      }
+
+      std::string Candidate;
+      do {
+        Candidate = Base + "_" + std::to_string(Next++);
+      } while (UsedFieldNames.find(Candidate) != UsedFieldNames.end());
+      UsedFieldNames[Candidate] = 1;
+      return Candidate;
+    };
+
     TaskInfo.ParameterFields.clear();
     unsigned ParamIndex = 0;
     for (ParmVarDecl *Param : TaskInfo.Parameters) {
@@ -252,16 +272,23 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
               ? Param->getName().str()
               : ("__param_" + std::to_string(ParamIndex));
       ++ParamIndex;
+      FieldName = makeUniqueFieldName(FieldName);
       FieldDecl *Field = addField(RD, FieldName, Param->getType());
       TaskInfo.ParameterFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(Param->getCanonicalDecl())] = Field;
     }
 
     TaskInfo.CapturedFields.clear();
+    unsigned CaptureIndex = 0;
     for (VarDecl *VD : TaskInfo.CapturedVariables) {
       if (!VD)
         continue;
-      std::string FieldName = "__cap_" + VD->getName().str();
+      std::string FieldName =
+          VD->getIdentifier()
+              ? ("__cap_" + VD->getName().str())
+              : ("__cap_anon_" + std::to_string(CaptureIndex));
+      ++CaptureIndex;
+      FieldName = makeUniqueFieldName(FieldName);
       QualType FieldTy = VD->getType();
       if (IsBlockWorker) {
         FieldTy = Ctx.getConstantArrayType(
@@ -283,7 +310,8 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     TaskInfo.ChildTidFields.clear();
     for (unsigned I = 0; I < TaskInfo.ScalarResultTaskCount; ++I) {
       FieldDecl *Field =
-          addField(RD, "__gtap_child_tid_" + std::to_string(I), Ctx.IntTy);
+          addField(RD, makeUniqueFieldName("__gtap_child_tid_" + std::to_string(I)),
+                   Ctx.IntTy);
       TaskInfo.ChildTidFields.push_back(Field);
     }
 
