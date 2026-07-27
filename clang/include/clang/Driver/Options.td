@@ -3802,6 +3802,11 @@ def fopenmp_assume_no_nested_parallelism : Flag<["-"], "fopenmp-assume-no-nested
 } // let Visibility = [ClangOption, CC1Option, FC1Option]
 } // let Flags = [NoArgumentUnused, HelpHidden]
 
+def fgtap_no_taskwait : Flag<["-"], "fgtap-no-taskwait">, Group<f_Group>,
+  Visibility<[ClangOption, CC1Option]>,
+  HelpText<"Compile GTaP code for the compact no-taskwait runtime mode">,
+  MarshallingInfoFlag<LangOpts<"GTaPNoTaskwait">>;
+
 def fopenmp_offload_mandatory : Flag<["-"], "fopenmp-offload-mandatory">, Group<f_Group>,
   Flags<[NoArgumentUnused]>, Visibility<[ClangOption, CC1Option]>,
   HelpText<"Do not create a host fallback if offloading to the device fails.">,

@@ -34,6 +34,7 @@ struct GTaPTaskFunctionInfo {
   std::vector<VarDecl *> CapturedVariables;
   QualType ReturnType;
   RecordDecl *TaskRecord = nullptr;
+  bool TaskRecordInvalid = false;
   std::vector<FieldDecl *> ParameterFields;
   std::vector<FieldDecl *> CapturedFields;
   std::vector<FieldDecl *> ChildTidFields;

@@ -192,6 +192,49 @@ static void checkTaskRecordSizeOrDiag(Sema &S, SourceLocation Loc, QualType Task
   }
 }
 
+static bool checkTaskDataFieldTypeOrDiag(Sema &S, SourceLocation Loc,
+                                         StringRef FieldName, QualType FieldTy) {
+  if (FieldTy.isNull())
+    return false;
+  if (FieldTy.isTriviallyCopyableType(S.getASTContext()))
+    return true;
+  S.Diag(Loc, diag::err_gtap_task_data_non_trivially_copyable)
+      << FieldName << FieldTy;
+  return false;
+}
+
+static bool stmtContainsGTaPTaskwait(Stmt *S) {
+  struct Finder : RecursiveASTVisitor<Finder> {
+    bool Found = false;
+    bool VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *) {
+      Found = true;
+      return false;
+    }
+  } F;
+  F.TraverseStmt(S);
+  return F.Found;
+}
+
+static bool checkNoTaskwaitInSwitchOrDiag(Sema &S, Stmt *Body) {
+  struct Checker : RecursiveASTVisitor<Checker> {
+    Sema &S;
+    bool Valid = true;
+
+    explicit Checker(Sema &S) : S(S) {}
+
+    bool TraverseSwitchStmt(SwitchStmt *SS) {
+      if (SS && stmtContainsGTaPTaskwait(SS->getBody())) {
+        S.Diag(SS->getBeginLoc(), diag::err_gtap_taskwait_in_switch);
+        Valid = false;
+        return false;
+      }
+      return RecursiveASTVisitor<Checker>::TraverseSwitchStmt(SS);
+    }
+  } C(S);
+  C.TraverseStmt(Body);
+  return C.Valid;
+}
+
 static unsigned countScalarResultTasks(Stmt *Body) {
   struct Counter : RecursiveASTVisitor<Counter> {
     unsigned Count = 0;
@@ -224,6 +267,9 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
   FieldMap.clear();
   const bool IsBlockWorker = isMacroDefined(S, "__GTAP_WORKER_IS_BLOCK");
   const uint64_t WorkerSize = getMacroIntegerValue(S, "GTAP_BLOCK_SIZE", 1);
+
+  if (TaskInfo.TaskRecordInvalid)
+    return nullptr;
 
   auto addField = [&](RecordDecl *RD, StringRef Name, QualType QT) -> FieldDecl * {
     IdentifierInfo &FieldId = Ctx.Idents.get(Name);
@@ -273,6 +319,11 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
               : ("__param_" + std::to_string(ParamIndex));
       ++ParamIndex;
       FieldName = makeUniqueFieldName(FieldName);
+      if (!checkTaskDataFieldTypeOrDiag(S, Param->getLocation(), FieldName,
+                                        Param->getType())) {
+        TaskInfo.TaskRecordInvalid = true;
+        return nullptr;
+      }
       FieldDecl *Field = addField(RD, FieldName, Param->getType());
       TaskInfo.ParameterFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(Param->getCanonicalDecl())] = Field;
@@ -290,6 +341,11 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       ++CaptureIndex;
       FieldName = makeUniqueFieldName(FieldName);
       QualType FieldTy = VD->getType();
+      if (!checkTaskDataFieldTypeOrDiag(S, VD->getLocation(), FieldName,
+                                        FieldTy)) {
+        TaskInfo.TaskRecordInvalid = true;
+        return nullptr;
+      }
       if (IsBlockWorker) {
         FieldTy = Ctx.getConstantArrayType(
             FieldTy, llvm::APInt(64, WorkerSize), nullptr,
@@ -304,8 +360,14 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     TaskInfo.StateField = nullptr;
 
     TaskInfo.ResultField = nullptr;
-    if (!TaskInfo.ReturnType.isNull() && !TaskInfo.ReturnType->isVoidType())
+    if (!TaskInfo.ReturnType.isNull() && !TaskInfo.ReturnType->isVoidType()) {
+      if (!checkTaskDataFieldTypeOrDiag(S, FD->getLocation(), "__gtap_result",
+                                        TaskInfo.ReturnType)) {
+        TaskInfo.TaskRecordInvalid = true;
+        return nullptr;
+      }
       TaskInfo.ResultField = addField(RD, "__gtap_result", TaskInfo.ReturnType);
+    }
 
     TaskInfo.ChildTidFields.clear();
     for (unsigned I = 0; I < TaskInfo.ScalarResultTaskCount; ++I) {
@@ -343,6 +405,19 @@ class GTaPTaskBodyTransformer
     : public TreeTransform<GTaPTaskBodyTransformer> {
   using Base = TreeTransform<GTaPTaskBodyTransformer>;
   GTaPExprBuilder &B;
+  ASTContext &Ctx;
+  VarDecl *SelfDecl;
+  llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
+  FieldDecl *ResultField;
+  SmallVector<FieldDecl *, 8> ChildTidFields;
+  ParmVarDecl *TidParam;
+  ParmVarDecl *CtxParam;
+  FunctionDecl *FinishDecl;
+  VarDecl *ChildCountVar;  // Function-level child_count variable
+  unsigned ReturnThread;  // Thread index for result write guard (when worker_size is block)
+  unsigned NextWaitId = 0;
+
+  bool InTaskDirective;
 public:
   GTaPTaskBodyTransformer(Sema &S, GTaPExprBuilder &B, VarDecl *SelfDecl,
                          llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap,
@@ -618,9 +693,15 @@ public:
         if (!Callee->hasAttr<GTaPFunctionAttr>())
           OriginalCall = nullptr;
     }
+
+    if (!OriginalCall) {
+      Base::getSema().Diag(Dir->getBeginLoc(), diag::err_gtap_task_invalid_statement);
+      InTaskDirective = OldInTaskDirective;
+      return StmtError();
+    }
     
     // If we found a GTaP function call, transform it to task spawning code
-    if (OriginalCall) {
+    {
       const FunctionDecl *Callee = OriginalCall->getDirectCallee();
       
       // This is a GTaP function call inside #pragma gtap task
@@ -987,17 +1068,7 @@ public:
       
       // Return the compound statement directly (no need to wrap in GTaPTaskDirective)
       return StmtResult(TaskCompound);
-    }
-    
-    // For other cases, transform normally
-    StmtResult Body = getDerived().TransformStmt(OriginalAssociatedStmt);
-    
-    // Restore flag
-    InTaskDirective = OldInTaskDirective;
-    
-    if (Body.isInvalid())
-      return StmtError();
-    return Body;
+  }
   }
 
   StmtResult TransformGTaPTaskwaitDirective(GTaPTaskwaitDirective *Dir) {
@@ -1077,22 +1148,6 @@ private:
         nullptr, Member, Loc, MultiExprArg(Args, 1), Loc);
   }
 
-  ASTContext &Ctx;
-  VarDecl *SelfDecl;
-  llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
-  FieldDecl *ResultField;
-  SmallVector<FieldDecl *, 8> ChildTidFields;
-  ParmVarDecl *TidParam;
-  ParmVarDecl *CtxParam;
-  FunctionDecl *FinishDecl;
-  VarDecl *ChildCountVar;  // Function-level child_count variable
-  unsigned ReturnThread;  // Thread index for result write guard (when worker_size is block)
-  unsigned NextWaitId = 0;
-  
-  // Flag to track if we're currently transforming inside a #pragma gtap task directive
-  // This prevents TransformCallExpr from transforming GTaP function calls that should
-  // be handled by TransformGTaPTaskDirective at AST level
-  bool InTaskDirective;
 };
 } // namespace
 
@@ -1185,7 +1240,8 @@ StmtResult SemaGTaP::ActOnGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc
 StmtResult SemaGTaP::ActOnGTaPTaskwaitDirective(SourceLocation StartLoc,
                                               SourceLocation EndLoc,
                                               Expr *QueueExpr) {
-  if (isMacroDefined(SemaRef, "GTAP_ASSUME_NO_TASKWAIT")) {
+  if (SemaRef.getLangOpts().GTaPNoTaskwait ||
+      isMacroDefined(SemaRef, "GTAP_ASSUME_NO_TASKWAIT")) {
     SemaRef.Diag(StartLoc, diag::err_gtap_taskwait_with_no_taskwait);
     return StmtError();
   }
@@ -1321,6 +1377,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
   RecordDecl *TaskRecord = createTaskDataRecord(SemaRef, CalleeDecl, TaskInfo, FieldMap);
   if (!TaskRecord) {
+    if (TaskInfo.TaskRecordInvalid)
+      return StmtError();
     SemaRef.Diag(StartLoc, diag::err_gtap_entry_function_not_initialized) << FuncName;
     return StmtError();
   }
@@ -1800,6 +1858,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     return StmtError();
 
   ASTContext &Ctx = getASTContext();
+  if (!checkNoTaskwaitInSwitchOrDiag(SemaRef, Body))
+    return StmtError();
   // llvm::errs() << "[GTaP][Sema] Enter TransformTaskFunctionBody for function '"
   //              << FD->getName() << "'\n";
 

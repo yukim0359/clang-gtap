@@ -175,10 +175,16 @@ def err_gtap_max_task_size_not_found : Error<
   "missing '__gtap_max_task_size'; define it before using gtap pragmas">;
 def err_gtap_task_record_too_large : Error<
   "gtap task data size (%0 bytes) exceeds '__gtap_max_task_size' (%1 bytes)">;
+def err_gtap_task_data_non_trivially_copyable : Error<
+  "gtap task-data field %0 has non-trivially-copyable type %1">;
 def err_gtap_runtime_function_not_found : Error<
   "runtime function '%0' not found; ensure GTaP runtime is properly linked">;
 def err_gtap_taskwait_with_no_taskwait : Error<
-  "#pragma gtap taskwait cannot be used when GTAP_ASSUME_NO_TASKWAIT is defined">;
+  "#pragma gtap taskwait cannot be used with -fgtap-no-taskwait or GTAP_ASSUME_NO_TASKWAIT">;
+def err_gtap_task_invalid_statement : Error<
+  "#pragma gtap task must be followed by a direct call to a GTaP task function or an assignment from such a call">;
+def err_gtap_taskwait_in_switch : Error<
+  "#pragma gtap taskwait inside a switch statement is not supported">;
 def err_gtap_entry_invalid_statement : Error<
   "#pragma gtap entry must be followed by a function call or assignment with function call">;
 def err_gtap_entry_no_callee : Error<

@@ -238,6 +238,7 @@ LANGOPT(OpenMPThreadSubscription  , 1, 0, NotCompatible, "Assume work-shared loo
 LANGOPT(OpenMPTeamSubscription  , 1, 0, NotCompatible, "Assume distributed loops do not have more iterations than participating teams.")
 LANGOPT(OpenMPNoThreadState  , 1, 0, NotCompatible, "Assume that no thread in a parallel region will modify an ICV.")
 LANGOPT(OpenMPNoNestedParallelism  , 1, 0, NotCompatible, "Assume that no thread in a parallel region will encounter a parallel region")
+LANGOPT(GTaPNoTaskwait, 1, 0, NotCompatible, "GTaP compact no-taskwait runtime mode")
 LANGOPT(OpenMPOffloadMandatory  , 1, 0, NotCompatible, "Assert that offloading is mandatory and do not create a host fallback.")
 LANGOPT(OpenMPForceUSM     , 1, 0, NotCompatible, "Enable OpenMP unified shared memory mode via compiler.")
 LANGOPT(NoGPULib  , 1, 0, NotCompatible, "Indicate a build without the standard GPU libraries.")
