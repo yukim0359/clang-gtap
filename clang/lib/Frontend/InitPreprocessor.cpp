@@ -1620,6 +1620,9 @@ void clang::InitializePreprocessor(Preprocessor &PP,
                          PP.getDiagnostics());
   }
 
+  if (LangOpts.GTaPNoTaskwait)
+    Builder.defineMacro("GTAP_ASSUME_NO_TASKWAIT");
+
   // Exit the command line and go back to <built-in> (2 is LC_LEAVE).
   Builder.append("# 1 \"<built-in>\" 2");
 

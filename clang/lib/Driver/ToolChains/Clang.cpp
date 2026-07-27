@@ -6731,6 +6731,7 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     Args.addOptOutFlag(CmdArgs, options::OPT_fopenmp_extensions,
                        options::OPT_fno_openmp_extensions);
   }
+  Args.AddLastArg(CmdArgs, options::OPT_fgtap_no_taskwait);
   // Forward the offload runtime change to code generation, liboffload implies
   // new driver. Otherwise, check if we should forward the new driver to change
   // offloading code generation.
