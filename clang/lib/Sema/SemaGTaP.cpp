@@ -235,31 +235,6 @@ static bool checkNoTaskwaitInSwitchOrDiag(Sema &S, Stmt *Body) {
   return C.Valid;
 }
 
-static unsigned countScalarResultTasks(Stmt *Body) {
-  struct Counter : RecursiveASTVisitor<Counter> {
-    unsigned Count = 0;
-
-    bool VisitGTaPTaskDirective(GTaPTaskDirective *Dir) {
-      if (!Dir || !Dir->hasAssociatedStmt())
-        return true;
-      auto *BO = dyn_cast<BinaryOperator>(Dir->getAssociatedStmt());
-      if (!BO || BO->getOpcode() != BO_Assign)
-        return true;
-      if (!isa<DeclRefExpr>(BO->getLHS()->IgnoreParenImpCasts()))
-        return true;
-      auto *Call = dyn_cast<CallExpr>(BO->getRHS()->IgnoreParenImpCasts());
-      if (!Call)
-        return true;
-      const FunctionDecl *Callee = Call->getDirectCallee();
-      if (Callee && Callee->hasAttr<GTaPFunctionAttr>())
-        ++Count;
-      return true;
-    }
-  } C;
-  C.TraverseStmt(Body);
-  return C.Count;
-}
-
 static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         GTaPTaskFunctionInfo &TaskInfo,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
@@ -360,6 +335,8 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     TaskInfo.StateField = nullptr;
 
     TaskInfo.ResultField = nullptr;
+    TaskInfo.ResultDstField = nullptr;
+    TaskInfo.SpawningThreadField = nullptr;
     if (!TaskInfo.ReturnType.isNull() && !TaskInfo.ReturnType->isVoidType()) {
       if (!checkTaskDataFieldTypeOrDiag(S, FD->getLocation(), "__gtap_result",
                                         TaskInfo.ReturnType)) {
@@ -367,14 +344,12 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
         return nullptr;
       }
       TaskInfo.ResultField = addField(RD, "__gtap_result", TaskInfo.ReturnType);
-    }
-
-    TaskInfo.ChildTidFields.clear();
-    for (unsigned I = 0; I < TaskInfo.ScalarResultTaskCount; ++I) {
-      FieldDecl *Field =
-          addField(RD, makeUniqueFieldName("__gtap_child_tid_" + std::to_string(I)),
-                   Ctx.IntTy);
-      TaskInfo.ChildTidFields.push_back(Field);
+      TaskInfo.ResultDstField = addField(
+          RD, "__gtap_result_dst",
+          Ctx.getPointerType(TaskInfo.ReturnType));
+      if (IsBlockWorker)
+        TaskInfo.SpawningThreadField =
+            addField(RD, "__gtap_spawning_thread", Ctx.IntTy);
     }
 
     RD->completeDefinition();
@@ -409,12 +384,12 @@ class GTaPTaskBodyTransformer
   VarDecl *SelfDecl;
   llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
   FieldDecl *ResultField;
-  SmallVector<FieldDecl *, 8> ChildTidFields;
+  FieldDecl *ResultDstField;
+  FieldDecl *SpawningThreadField;
   ParmVarDecl *TidParam;
   ParmVarDecl *CtxParam;
   FunctionDecl *FinishDecl;
   VarDecl *ChildCountVar;  // Function-level child_count variable
-  unsigned ReturnThread;  // Thread index for result write guard (when worker_size is block)
   unsigned NextWaitId = 0;
 
   bool InTaskDirective;
@@ -422,16 +397,17 @@ public:
   GTaPTaskBodyTransformer(Sema &S, GTaPExprBuilder &B, VarDecl *SelfDecl,
                          llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap,
                          FieldDecl *ResultField,
-                         ArrayRef<FieldDecl *> ChildTidFields,
+                         FieldDecl *ResultDstField,
+                         FieldDecl *SpawningThreadField,
                          ParmVarDecl *TidParam, ParmVarDecl *CtxParam,
-                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar,
-                         unsigned ReturnThread)
+                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar)
       : Base(S), B(B), Ctx(S.getASTContext()), SelfDecl(SelfDecl),
         FieldMap(std::move(FieldMap)), ResultField(ResultField),
-        ChildTidFields(ChildTidFields.begin(), ChildTidFields.end()),
+        ResultDstField(ResultDstField),
+        SpawningThreadField(SpawningThreadField),
         TidParam(TidParam), CtxParam(CtxParam),
         FinishDecl(FinishDecl), ChildCountVar(ChildCountVar),
-        ReturnThread(ReturnThread), InTaskDirective(false) {}
+        InTaskDirective(false) {}
 
   // Generic hooks: log every statement we are about to transform.
   // We must preserve both overloads from TreeTransform:
@@ -558,14 +534,23 @@ public:
             FPOptionsOverride());
       }
       
-      ExprResult LHSER = B.buildFieldAccess(B.buildSelfRef(), true, ResultField, SourceLocation());
-      if (LHSER.isInvalid()) return StmtError();
-      Expr *LHS = LHSER.get();
-      ExprResult AssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, LHS, RHS);
-      if (AssignER.isInvalid()) return StmtError();
-      Expr *AssignExpr = AssignER.get();
+      if (!ResultDstField)
+        return StmtError();
+      ExprResult DstER = B.buildFieldAccess(
+          B.buildSelfRef(), true, ResultDstField, SourceLocation());
+      if (DstER.isInvalid())
+        return StmtError();
+      Expr *DstLHS = UnaryOperator::Create(
+          Ctx, toRValue(DstER.get()), UO_Deref,
+          ResultField->getType(), VK_LValue, OK_Ordinary,
+          SourceLocation(), false, FPOptionsOverride());
+      ExprResult StoreER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, DstLHS, RHS);
+      if (StoreER.isInvalid())
+        return StmtError();
+      Stmt *ResultWriteStmt = StoreER.get();
 
-      const bool GuardResultWrite = isMacroDefined(Base::getSema(), "__GTaP_WORKER_IS_BLOCK");
+      const bool GuardResultWrite = SpawningThreadField != nullptr;
       if (GuardResultWrite) {
   
         Expr *Cond = nullptr;
@@ -591,19 +576,28 @@ public:
                                                  nullptr, nullptr);
   
             if (!ThreadIdxX.isInvalid()) {
-              Expr *RT = IntegerLiteral::Create(
-                  Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), ReturnThread),
-                  Ctx.IntTy, SourceLocation());
+              ExprResult SpawningThreadER = B.buildFieldAccess(
+                  B.buildSelfRef(), true, SpawningThreadField,
+                  SourceLocation());
+              if (SpawningThreadER.isInvalid())
+                return StmtError();
+              Expr *SpawningThread = SpawningThreadER.get();
+              if (SpawningThread->isGLValue())
+                SpawningThread = ImplicitCastExpr::Create(
+                    Ctx, SpawningThread->getType(), CK_LValueToRValue,
+                    SpawningThread, nullptr, VK_PRValue,
+                    FPOptionsOverride());
   
               ExprResult Eq = SemaRef.BuildBinOp(
-                  nullptr, SourceLocation(), BO_EQ, ThreadIdxX.get(), RT);
+                  nullptr, SourceLocation(), BO_EQ, ThreadIdxX.get(),
+                  SpawningThread);
               if (!Eq.isInvalid()) Cond = Eq.get();
             }
           }
         }
   
         if (Cond) {
-          Stmt *ThenS = AssignExpr;
+          Stmt *ThenS = ResultWriteStmt;
           IfStmt *If = IfStmt::Create(
               Ctx, SourceLocation(),
               IfStatementKind::Ordinary,
@@ -614,10 +608,10 @@ public:
   
           Sequence.push_back(If);
         } else {
-          Sequence.push_back(AssignExpr);
+          Sequence.push_back(ResultWriteStmt);
         }
       } else {
-        Sequence.push_back(AssignExpr);
+        Sequence.push_back(ResultWriteStmt);
       }
     }
 
@@ -661,7 +655,6 @@ public:
     // We need to extract the function call BEFORE transforming the statement
     // Store the result variable for later assignment after taskwait
     CallExpr *OriginalCall = nullptr;
-    VarDecl *ResultVar = nullptr;
     Expr *ResultLHS = nullptr;
     
     if (auto *BinOp = dyn_cast<BinaryOperator>(OriginalAssociatedStmt)) {
@@ -671,9 +664,6 @@ public:
           const FunctionDecl *Callee = Call->getDirectCallee();
           if (Callee && Callee->hasAttr<GTaPFunctionAttr>()) {
             // Extract result variable and original call BEFORE transformation
-            if (auto *DRE = dyn_cast<DeclRefExpr>(BinOp->getLHS()->IgnoreParenImpCasts())) {
-              ResultVar = dyn_cast<VarDecl>(DRE->getDecl());
-            }
             ResultLHS = BinOp->getLHS();
             OriginalCall = Call;
           }
@@ -756,16 +746,6 @@ public:
         InTaskDirective = OldInTaskDirective;
         return StmtError();
       }
-      FunctionDecl *AppendResultHandleFunc = nullptr;
-      if (ResultLHS && !ResultVar) {
-        AppendResultHandleFunc = requireRuntimeFunction(
-            Base::getSema(), "__gtap_append_result_handle", Dir->getBeginLoc());
-        if (!AppendResultHandleFunc) {
-          InTaskDirective = OldInTaskDirective;
-          return StmtError();
-        }
-      }
-      
       // Build queue_idx argument
       Expr *QueueArg = nullptr;
       if (Expr *QE = Dir->getQueueExpr()) {
@@ -814,80 +794,16 @@ public:
             OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
       }
 
-      FieldDecl *ChildTidField = nullptr;
-      if (ResultVar && ResultHandleOrdinal < ChildTidFields.size()) {
-        ChildTidField = ChildTidFields[ResultHandleOrdinal++];
-      }
-      const bool UseDynamicResultHandle = ResultLHS && !ResultVar;
-      VarDecl *DynamicChildTidVar = nullptr;
-      unsigned DynamicResultHandleKind = 0;
-      if (UseDynamicResultHandle) {
-        DynamicResultHandleKind = DynamicResultHandleOrdinal++;
-        std::string ChildTidName = "__gtap_dynamic_child_tid_" +
-                                   std::to_string(DynamicResultHandleKind);
-        IdentifierInfo &ChildTidId = Ctx.Idents.get(ChildTidName);
-        DynamicChildTidVar = VarDecl::Create(
-            Ctx, CurrentDC, SourceLocation(), SourceLocation(), &ChildTidId,
-            IntTy, Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
-        DynamicChildTidVar->setInit(IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy,
-            SourceLocation()));
-        TaskStmts.push_back(new (Ctx) DeclStmt(
-            DeclGroupRef(DynamicChildTidVar), SourceLocation(), SourceLocation()));
-      }
-
-      Expr *ChildTidOutArg = nullptr;
-      VarDecl *LocalChildTidVar = nullptr;
-      if (ChildTidField) {
-        ExprResult ChildTidLHSER =
-            B.buildFieldAccess(B.buildSelfRef(), /*IsArrow=*/true,
-                               ChildTidField, SourceLocation());
-        if (ChildTidLHSER.isInvalid())
-          return StmtError();
-        ChildTidOutArg = UnaryOperator::Create(
-            Ctx, ChildTidLHSER.get(), UO_AddrOf, IntPtrTy, VK_PRValue,
-            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-      } else if (DynamicChildTidVar) {
-        Expr *ChildTidRef = DeclRefExpr::Create(
-            Ctx, NestedNameSpecifierLoc(), SourceLocation(), DynamicChildTidVar,
-            false, SourceLocation(), IntTy, VK_LValue);
-        ChildTidOutArg = UnaryOperator::Create(
-            Ctx, ChildTidRef, UO_AddrOf, IntPtrTy, VK_PRValue,
-            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-      } else {
-        std::string ChildTidName = "__gtap_child_tid_" +
-                                   std::to_string(reinterpret_cast<uintptr_t>(OriginalCall));
-        IdentifierInfo &ChildTidId = Ctx.Idents.get(ChildTidName);
-        LocalChildTidVar = VarDecl::Create(
-            Ctx, CurrentDC, SourceLocation(), SourceLocation(), &ChildTidId,
-            IntTy, Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
-        LocalChildTidVar->setInit(IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy,
-            SourceLocation()));
-        TaskStmts.push_back(new (Ctx) DeclStmt(
-            DeclGroupRef(LocalChildTidVar), SourceLocation(), SourceLocation()));
-        Expr *ChildTidRef = DeclRefExpr::Create(
-            Ctx, NestedNameSpecifierLoc(), SourceLocation(), LocalChildTidVar,
-            false, SourceLocation(), IntTy, VK_LValue);
-        ChildTidOutArg = UnaryOperator::Create(
-            Ctx, ChildTidRef, UO_AddrOf, IntPtrTy, VK_PRValue,
-            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-      }
-      
       // Build __gtap_spawn_task call
-      // Signature: void* __gtap_spawn_task(TaskContext* ctx, int self_tid, int* child_count, 
-      //                                    void (*func)(...), int queue_idx, int* out_tid,
-      //                                    bool retain_parent_result)
-      SmallVector<Expr *, 7> SpawnArgs;
+      // Signature: void* __gtap_spawn_task(TaskContext* ctx, int self_tid,
+      //                                    int* child_count, void (*func)(...),
+      //                                    int queue_idx)
+      SmallVector<Expr *, 5> SpawnArgs;
       SpawnArgs.push_back(buildParamRValue(CtxParam));      // ctx
       SpawnArgs.push_back(buildParamRValue(TidParam));      // self_tid
       SpawnArgs.push_back(ChildCountArg);                    // child_count
       SpawnArgs.push_back(StateMachinePtr);                  // func
       SpawnArgs.push_back(QueueArg);                         // queue_idx
-      SpawnArgs.push_back(ChildTidOutArg);                   // out_tid
-      SpawnArgs.push_back(CXXBoolLiteralExpr::Create(
-          Ctx, ResultLHS != nullptr && CalleeTaskInfo.ResultField != nullptr,
-          Ctx.BoolTy, SourceLocation()));                    // retain_parent_result
       
       ExprResult SpawnCallee = S.BuildDeclRefExpr(
           SpawnTaskFunc, SpawnTaskFunc->getType(), VK_LValue, SourceLocation());
@@ -922,7 +838,30 @@ public:
           DeclGroupRef(TaskPtrVar), SourceLocation(), SourceLocation());
       TaskStmts.push_back(TaskPtrDecl);
 
-      if (UseDynamicResultHandle) {
+      if (CalleeTaskInfo.SpawningThreadField) {
+        Expr *ThreadIdxX = buildThreadIdxXExpr(S, SourceLocation());
+        if (!ThreadIdxX)
+          return StmtError();
+        Expr *TaskPtrRef = DeclRefExpr::Create(
+            Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
+            false, SourceLocation(), TaskPtrTy, VK_LValue);
+        Expr *TaskPtrRValue = ImplicitCastExpr::Create(
+            Ctx, TaskPtrTy, CK_LValueToRValue, TaskPtrRef, nullptr,
+            VK_PRValue, FPOptionsOverride());
+        ExprResult SpawningThreadFieldER = B.buildFieldAccess(
+            TaskPtrRValue, /*IsArrow=*/true,
+            CalleeTaskInfo.SpawningThreadField, SourceLocation());
+        if (SpawningThreadFieldER.isInvalid())
+          return StmtError();
+        ExprResult AssignER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign,
+            SpawningThreadFieldER.get(), ThreadIdxX);
+        if (AssignER.isInvalid())
+          return StmtError();
+        TaskStmts.push_back(AssignER.get());
+      }
+
+      if (ResultLHS && CalleeTaskInfo.ResultDstField) {
         ExprResult LHSER = getDerived().TransformExpr(ResultLHS);
         if (LHSER.isInvalid())
           return StmtError();
@@ -931,34 +870,23 @@ public:
         Expr *LHSAddr = UnaryOperator::Create(
             Ctx, LHS, UO_AddrOf, LHSAddrTy, VK_PRValue,
             OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-        Expr *LHSVoidAddr = CStyleCastExpr::Create(
-            Ctx, VoidPtrTy, VK_PRValue, CK_BitCast, LHSAddr,
-            nullptr, FPOptionsOverride(),
-            Ctx.getTrivialTypeSourceInfo(VoidPtrTy),
-            SourceLocation(), SourceLocation());
-        Expr *DynamicChildTidRef = DeclRefExpr::Create(
-            Ctx, NestedNameSpecifierLoc(), SourceLocation(), DynamicChildTidVar,
-            false, SourceLocation(), IntTy, VK_LValue);
-
-        SmallVector<Expr *, 4> AppendArgs;
-        AppendArgs.push_back(buildParamRValue(TidParam));
-        AppendArgs.push_back(IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), DynamicResultHandleKind),
-            IntTy, SourceLocation()));
-        AppendArgs.push_back(toRValue(DynamicChildTidRef));
-        AppendArgs.push_back(LHSVoidAddr);
-
-        ExprResult AppendCallee = S.BuildDeclRefExpr(
-            AppendResultHandleFunc, AppendResultHandleFunc->getType(),
-            VK_LValue, SourceLocation());
-        if (AppendCallee.isInvalid())
-          return StmtError();
-        ExprResult AppendCall = S.BuildCallExpr(
-            nullptr, AppendCallee.get(), SourceLocation(), AppendArgs,
+        Expr *TaskPtrRef = DeclRefExpr::Create(
+            Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
+            false, SourceLocation(), TaskPtrTy, VK_LValue);
+        Expr *TaskPtrRValue = ImplicitCastExpr::Create(
+            Ctx, TaskPtrTy, CK_LValueToRValue, TaskPtrRef, nullptr,
+            VK_PRValue, FPOptionsOverride());
+        ExprResult DstFieldER = B.buildFieldAccess(
+            TaskPtrRValue, true, CalleeTaskInfo.ResultDstField,
             SourceLocation());
-        if (AppendCall.isInvalid())
+        if (DstFieldER.isInvalid())
           return StmtError();
-        TaskStmts.push_back(AppendCall.get());
+        ExprResult DstAssignER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign,
+            DstFieldER.get(), LHSAddr);
+        if (DstAssignER.isInvalid())
+          return StmtError();
+        TaskStmts.push_back(DstAssignER.get());
       }
       
       // Create TaskPtrRef for field access (use arrow operator since it's a pointer)
@@ -999,64 +927,28 @@ public:
         ++ArgIndex;
       }
       
-      // Initialize result field
-      if (CalleeTaskInfo.ResultField) {
-        ExprResult ResultFieldRefER = B.buildFieldAccess(buildTaskPtrRef(), /*IsArrow=*/true, CalleeTaskInfo.ResultField, SourceLocation());
-        if (ResultFieldRefER.isInvalid()) return StmtError();
-        Expr *ResultFieldRef = ResultFieldRefER.get();
-        QualType ResultTy = CalleeTaskInfo.ResultField->getType();
-        Expr *ZeroInit = nullptr;
-        if (ResultTy->isIntegerType()) {
-          ZeroInit = IntegerLiteral::Create(
-              Ctx, llvm::APInt(Ctx.getIntWidth(ResultTy), 0), ResultTy,
-              SourceLocation());
-        } else if (ResultTy->isFloatingType()) {
-          ZeroInit = FloatingLiteral::Create(
-              Ctx, llvm::APFloat(0.0), false, ResultTy, SourceLocation());
-        } else {
-          // For pointer types, use nullptr cast
-          Expr *NullPtr = CStyleCastExpr::Create(
-              Ctx, ResultTy, VK_PRValue, CK_NullToPointer,
-              IntegerLiteral::Create(Ctx, llvm::APInt(64, 0), Ctx.IntTy, SourceLocation()),
-              nullptr, FPOptionsOverride(),
-              Ctx.getTrivialTypeSourceInfo(ResultTy),
-              SourceLocation(), SourceLocation());
-          ZeroInit = NullPtr;
-        }
-        if (ZeroInit) {
-          ExprResult ResultAssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, ResultFieldRef, ZeroInit);
-          if (ResultAssignER.isInvalid()) return StmtError();
-          Expr *ResultAssign = ResultAssignER.get();
-          TaskStmts.push_back(ResultAssign);
-        }
-      }
-
-      unsigned MyChildIndex = SpawnOrdinal++;
-      if (ResultVar) {
-        if (!CalleeTaskInfo.ResultField) {
+      // A discarded result is written to the child's own result field.
+      // Assigned results have already installed the parent's destination.
+      if (CalleeTaskInfo.ResultDstField && CalleeTaskInfo.ResultField &&
+          !ResultLHS) {
+        ExprResult DstFieldER = B.buildFieldAccess(
+            buildTaskPtrRef(), /*IsArrow=*/true,
+            CalleeTaskInfo.ResultDstField, SourceLocation());
+        ExprResult ResultFieldER = B.buildFieldAccess(
+            buildTaskPtrRef(), /*IsArrow=*/true,
+            CalleeTaskInfo.ResultField, SourceLocation());
+        if (DstFieldER.isInvalid() || ResultFieldER.isInvalid())
           return StmtError();
-        } else {
-          TaskResultSlot Slot;
-          Slot.LHSDecl = dyn_cast<ValueDecl>(ResultVar->getCanonicalDecl());
-          Slot.ChildIndex = MyChildIndex;
-          Slot.ChildTidField = ChildTidField;
-          Slot.ChildTaskRecordTy = TaskRecordTy;
-          Slot.ChildResultField  = CalleeTaskInfo.ResultField;
-          CurrentWaitSlots.push_back(Slot);
-        }
-      } else if (UseDynamicResultHandle) {
-        if (!CalleeTaskInfo.ResultField) {
+        Expr *OwnResultAddr = UnaryOperator::Create(
+            Ctx, ResultFieldER.get(), UO_AddrOf,
+            CalleeTaskInfo.ResultDstField->getType(), VK_PRValue,
+            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
+        ExprResult AssignER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign,
+            DstFieldER.get(), OwnResultAddr);
+        if (AssignER.isInvalid())
           return StmtError();
-        } else {
-          TaskResultSlot Slot;
-          Slot.UsesDynamicResultHandle = true;
-          Slot.DynamicResultHandleKind = DynamicResultHandleKind;
-          Slot.LHSType = ResultLHS->getType();
-          Slot.ChildIndex = MyChildIndex;
-          Slot.ChildTaskRecordTy = TaskRecordTy;
-          Slot.ChildResultField = CalleeTaskInfo.ResultField;
-          CurrentWaitSlots.push_back(Slot);
-        }
+        TaskStmts.push_back(AssignER.get());
       }
 
       // Create compound statement
@@ -1081,36 +973,10 @@ public:
     Dir->setQueueExpr(NewQueueExpr);
     unsigned id = NextWaitId++;
     Dir->setWaitId(id);
-
-    SlotsByWait.push_back(CurrentWaitSlots);
-    CurrentWaitSlots.clear();
-    SpawnOrdinal = 0;
-
     return StmtResult(Dir);
-  }
-  
-  struct TaskResultSlot {
-    const ValueDecl *LHSDecl = nullptr;
-    unsigned ChildIndex = 0;
-    FieldDecl *ChildTidField = nullptr;
-    bool UsesDynamicResultHandle = false;
-    unsigned DynamicResultHandleKind = 0;
-    QualType LHSType;
-    QualType ChildTaskRecordTy;
-    FieldDecl *ChildResultField = nullptr;
-  };
-
-  SmallVector<SmallVector<TaskResultSlot, 8>, 8> &getSlotsByWait() {
-    return SlotsByWait;
   }
 
 private:
-  unsigned SpawnOrdinal = 0;
-  unsigned ResultHandleOrdinal = 0;
-  unsigned DynamicResultHandleOrdinal = 0;
-  SmallVector<TaskResultSlot, 8> CurrentWaitSlots;
-  SmallVector<SmallVector<TaskResultSlot, 8>, 8> SlotsByWait;
-
   Expr *buildDeclRefLValue(ValueDecl *D) const {
     return DeclRefExpr::Create(Ctx, NestedNameSpecifierLoc(), SourceLocation(),
                                D, /*RefersToEnclosingVariableOrCapture=*/false,
@@ -1478,38 +1344,54 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       ++ArgIndex;
     }
     
-    // Initialize __gtap_result = 0 using pointer
-    if (TaskInfo.ResultField) {
+    // The root task has no spawning parent thread. Preserve the existing
+    // block-mode entry convention in which thread 0 supplies its result.
+    if (TaskInfo.SpawningThreadField) {
       Expr *TaskPtrRef = DeclRefExpr::Create(
           Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
           false, StartLoc, TaskPtrVar->getType(), VK_LValue);
       Expr *TaskPtrRValue = ImplicitCastExpr::Create(
           Ctx, TaskPtrVar->getType(), CK_LValueToRValue,
           TaskPtrRef, nullptr, VK_PRValue, FPOptionsOverride());
-      
-      ExprResult ResultAccessER = B.buildFieldAccess(TaskPtrRValue, true, TaskInfo.ResultField, SourceLocation());
-      if (ResultAccessER.isInvalid()) return StmtError();
-      Expr *ResultAccess = ResultAccessER.get();
-      
-      QualType ResultTy = TaskInfo.ResultField->getType();
-      Expr *ZeroInit = nullptr;
-      if (ResultTy->isIntegerType()) {
-        ZeroInit = IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(ResultTy), 0),
-            ResultTy, StartLoc);
-      } else if (ResultTy->isFloatingType()) {
-        ZeroInit = FloatingLiteral::Create(
-            Ctx, llvm::APFloat(0.0), false, ResultTy, StartLoc);
-      }
-      
-      if (ZeroInit) {
-        ExprResult ResultAssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, ResultAccess, ZeroInit);
-        if (ResultAssignER.isInvalid()) return StmtError();
-        Expr *ResultAssign = ResultAssignER.get();
-        
-        DeviceStmts.push_back(ResultAssign);
-      }
+      ExprResult FieldER = B.buildFieldAccess(
+          TaskPtrRValue, true, TaskInfo.SpawningThreadField,
+          SourceLocation());
+      if (FieldER.isInvalid())
+        return StmtError();
+      Expr *Zero = IntegerLiteral::Create(
+          Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc);
+      ExprResult AssignER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, FieldER.get(), Zero);
+      if (AssignER.isInvalid())
+        return StmtError();
+      DeviceStmts.push_back(AssignER.get());
     }
+
+    if (TaskInfo.ResultDstField && TaskInfo.ResultField) {
+      Expr *TaskPtrRef = DeclRefExpr::Create(
+          Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
+          false, StartLoc, TaskPtrVar->getType(), VK_LValue);
+      Expr *TaskPtrRValue = ImplicitCastExpr::Create(
+          Ctx, TaskPtrVar->getType(), CK_LValueToRValue,
+          TaskPtrRef, nullptr, VK_PRValue, FPOptionsOverride());
+      ExprResult FieldER = B.buildFieldAccess(
+          TaskPtrRValue, true, TaskInfo.ResultDstField, SourceLocation());
+      ExprResult ResultER = B.buildFieldAccess(
+          TaskPtrRValue, true, TaskInfo.ResultField, SourceLocation());
+      if (FieldER.isInvalid() || ResultER.isInvalid())
+        return StmtError();
+      Expr *OwnResultAddr = UnaryOperator::Create(
+          Ctx, ResultER.get(), UO_AddrOf,
+          TaskInfo.ResultDstField->getType(), VK_PRValue,
+          OK_Ordinary, StartLoc, false, FPOptionsOverride());
+      ExprResult AssignER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign,
+          FieldER.get(), OwnResultAddr);
+      if (AssignER.isInvalid())
+        return StmtError();
+      DeviceStmts.push_back(AssignER.get());
+    }
+
   }
 
   // Initialize function pointer directly from CalleeDecl
@@ -1843,10 +1725,6 @@ void SemaGTaP::ActOnStartOfFunctionDef(FunctionDecl *FD) {
     FD->addAttr(GTaPFunctionAttr::Create(getASTContext(),
                                          PendingFunctionPragmaLoc));
     
-    // Save return_thread to task info
-    GTaPTaskFunctionInfo &TaskInfo = getCachedTaskInfo(FD);
-    TaskInfo.ReturnThread = PendingFunctionReturnThread;
-    
     // Clear the pending pragma
     clearPendingGTaPFunctionPragma();
   }
@@ -1871,7 +1749,6 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   GTaPTaskFunctionAnalyzer Analyzer(Ctx, FD);
   GTaPTaskFunctionInfo TaskInfo = Analyzer.analyze(Body);
-  TaskInfo.ScalarResultTaskCount = countScalarResultTasks(Body);
   CachedTaskInfos[FD] = TaskInfo;
 
   // llvm::errs() << "[GTaP][Sema]  TaskInfo: params=" << TaskInfo.Parameters.size()
@@ -1951,8 +1828,9 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   GTaPExprBuilder B(SemaRef, SelfTypedVar);
   GTaPTaskBodyTransformer Transformer(
       SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[FD].ResultField,
-      CachedTaskInfos[FD].ChildTidFields,
-      TidParam, CtxParam, FinishFn, ChildCountVar, CachedTaskInfos[FD].ReturnThread);
+      CachedTaskInfos[FD].ResultDstField,
+      CachedTaskInfos[FD].SpawningThreadField,
+      TidParam, CtxParam, FinishFn, ChildCountVar);
   StmtResult Transformed = Transformer.TransformStmt(Body);
   if (Transformed.isInvalid())
     return StmtError();
@@ -2082,291 +1960,6 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
         Return, SourceLocation(), nullptr));
   };
 
-  // result retrieval generation
-  auto &SlotsByWait = Transformer.getSlotsByWait();
-  // llvm::errs() << "[GTaP][Sema]  SlotsByWait size: " << SlotsByWait.size() << "\n";
-
-  FunctionDecl *GetChildTaskIdFn = requireRuntimeFunction(SemaRef, "__gtap_get_child_task_id", Body->getBeginLoc());
-  FunctionDecl *GetTaskDataFn    = requireRuntimeFunction(SemaRef, "__gtap_get_task_data", Body->getBeginLoc());
-  if (!GetChildTaskIdFn || !GetTaskDataFn)
-    return StmtError();
-  FunctionDecl *GetResultHandleBeginFn =
-      requireRuntimeFunction(SemaRef, "__gtap_get_result_handle_begin", Body->getBeginLoc());
-  FunctionDecl *GetResultHandleChildTidFn =
-      requireRuntimeFunction(SemaRef, "__gtap_get_result_handle_child_tid", Body->getBeginLoc());
-  FunctionDecl *GetResultHandleKindFn =
-      requireRuntimeFunction(SemaRef, "__gtap_get_result_handle_kind", Body->getBeginLoc());
-  FunctionDecl *GetResultHandleNextFn =
-      requireRuntimeFunction(SemaRef, "__gtap_get_result_handle_next", Body->getBeginLoc());
-  FunctionDecl *GetResultHandleLHSAddrFn =
-      requireRuntimeFunction(SemaRef, "__gtap_get_result_handle_lhs_addr", Body->getBeginLoc());
-  FunctionDecl *ClearResultHandlesFn =
-      requireRuntimeFunction(SemaRef, "__gtap_clear_result_handles", Body->getBeginLoc());
-  FunctionDecl *ReleaseTaskIdFn =
-      requireRuntimeFunction(SemaRef, "__gtap_release_task_id", Body->getBeginLoc());
-  if (!GetResultHandleBeginFn || !GetResultHandleChildTidFn ||
-      !GetResultHandleKindFn ||
-      !GetResultHandleNextFn || !GetResultHandleLHSAddrFn ||
-      !ClearResultHandlesFn || !ReleaseTaskIdFn)
-    return StmtError();
-
-  auto buildCall = [&](FunctionDecl *Fn, SmallVectorImpl<Expr*> &Args) -> Expr* {
-    ExprResult Callee = SemaRef.BuildDeclRefExpr(
-        Fn, Fn->getType(), VK_LValue, SourceLocation());
-    if (Callee.isInvalid())
-      return nullptr;
-    ExprResult Call = SemaRef.BuildCallExpr(
-        nullptr, Callee.get(), SourceLocation(), Args, SourceLocation());
-    if (Call.isInvalid())
-      return nullptr;
-    return Call.get();
-  };
-
-  auto buildStateMachineCapturedFieldAccess =
-    [&](FieldDecl *Field, SourceLocation Loc = SourceLocation()) -> ExprResult {
-      ExprResult MemberER = B.buildFieldAccess(B.buildSelfRef(), true, Field, Loc);
-      if (MemberER.isInvalid())
-        return ExprError();
-
-      Expr *Member = MemberER.get();
-      if (!Ctx.getAsConstantArrayType(Field->getType()))
-        return Member;
-
-      Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, Loc);
-      if (!ThreadIdxX)
-        return ExprError();
-
-      Expr *Args[] = {ThreadIdxX};
-      return SemaRef.ActOnArraySubscriptExpr(
-          nullptr, Member, Loc, MultiExprArg(Args, 1), Loc);
-    };
-
-  auto generateResultRetrievalForSlots =
-    [&](ArrayRef<GTaPTaskBodyTransformer::TaskResultSlot> Slots) -> SmallVector<Stmt*, 8> {
-
-    SmallVector<Stmt*, 8> ResultAssignments;
-    bool HasDynamicResultHandles = false;
-
-    for (const auto &Slot : Slots) {
-      if (Slot.ChildTaskRecordTy.isNull() || !Slot.ChildResultField) continue;
-      if (Slot.UsesDynamicResultHandle) {
-        HasDynamicResultHandles = true;
-
-        std::string Suffix = std::to_string(Slot.DynamicResultHandleKind);
-        IdentifierInfo &BeginId = Ctx.Idents.get("__gtap_rh_begin_" + Suffix);
-        VarDecl *BeginVar = VarDecl::Create(
-            Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &BeginId,
-            IntTy, Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
-        SmallVector<Expr*, 1> BeginArgs = {
-            asRValue(buildParamLValue(TidParam))};
-        Expr *BeginCall = buildCall(GetResultHandleBeginFn, BeginArgs);
-        if (!BeginCall) return {};
-        BeginVar->setInit(BeginCall);
-        ResultAssignments.push_back(new (Ctx) DeclStmt(
-            DeclGroupRef(BeginVar), SourceLocation(), SourceLocation()));
-
-        IdentifierInfo &IId = Ctx.Idents.get("__gtap_rh_i_" + Suffix);
-        VarDecl *IVar = VarDecl::Create(
-            Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &IId,
-            IntTy, Ctx.getTrivialTypeSourceInfo(IntTy), SC_None);
-        IVar->setInit(asRValue(DeclRefExpr::Create(
-            Ctx, NestedNameSpecifierLoc(), SourceLocation(), BeginVar,
-            false, SourceLocation(), BeginVar->getType(), VK_LValue)));
-        DeclStmt *InitStmt = new (Ctx) DeclStmt(
-            DeclGroupRef(IVar), SourceLocation(), SourceLocation());
-
-        auto buildVarRef = [&](VarDecl *VD) -> Expr* {
-          return DeclRefExpr::Create(
-              Ctx, NestedNameSpecifierLoc(), SourceLocation(), VD,
-              false, SourceLocation(), VD->getType(), VK_LValue);
-        };
-        ExprResult CondER = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_GE, asRValue(buildVarRef(IVar)),
-            IntegerLiteral::Create(
-                Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy,
-                SourceLocation()));
-        if (CondER.isInvalid()) return {};
-        SmallVector<Expr*, 1> NextArgs = {asRValue(buildVarRef(IVar))};
-        Expr *NextCall = buildCall(GetResultHandleNextFn, NextArgs);
-        if (!NextCall) return {};
-        ExprResult IncER = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_Assign, buildVarRef(IVar), NextCall);
-        if (IncER.isInvalid()) return {};
-        Expr *Inc = IncER.get();
-
-        Expr *HandleIndex = asRValue(buildVarRef(IVar));
-        SmallVector<Expr*, 1> KindArgs = {HandleIndex};
-        Expr *KindCall = buildCall(GetResultHandleKindFn, KindArgs);
-        if (!KindCall) return {};
-        ExprResult KindCondER = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_EQ, KindCall,
-            IntegerLiteral::Create(
-                Ctx, llvm::APInt(Ctx.getIntWidth(IntTy),
-                                 Slot.DynamicResultHandleKind),
-                IntTy, SourceLocation()));
-        if (KindCondER.isInvalid()) return {};
-
-        SmallVector<Expr*, 1> ChildTidArgs = {asRValue(buildVarRef(IVar))};
-        Expr *ChildTid = buildCall(GetResultHandleChildTidFn, ChildTidArgs);
-        if (!ChildTid) return {};
-
-        SmallVector<Expr*, 1> LHSAddrArgs = {asRValue(buildVarRef(IVar))};
-        Expr *LHSAddrVoid = buildCall(GetResultHandleLHSAddrFn, LHSAddrArgs);
-        if (!LHSAddrVoid) return {};
-        QualType LHSPtrTy = Ctx.getPointerType(Slot.LHSType);
-        TypeSourceInfo *LHSPtrTSI = Ctx.getTrivialTypeSourceInfo(LHSPtrTy);
-        ExprResult LHSPtrCastER = SemaRef.BuildCStyleCastExpr(
-            SourceLocation(), LHSPtrTSI, SourceLocation(), LHSAddrVoid);
-        if (LHSPtrCastER.isInvalid()) return {};
-        Expr *LHS = UnaryOperator::Create(
-            Ctx, LHSPtrCastER.get(), UO_Deref, Slot.LHSType, VK_LValue,
-            OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
-
-        SmallVector<Expr*, 1> DataPtrArgs = {ChildTid};
-        Expr *DataPtr = buildCall(GetTaskDataFn, DataPtrArgs);
-        if (!DataPtr) return {};
-        QualType ChildPtrTy = Ctx.getPointerType(Slot.ChildTaskRecordTy);
-        TypeSourceInfo *ChildTSI = Ctx.getTrivialTypeSourceInfo(ChildPtrTy);
-        ExprResult ChildCastER = SemaRef.BuildCStyleCastExpr(
-            SourceLocation(), ChildTSI, SourceLocation(), DataPtr);
-        if (ChildCastER.isInvalid()) return {};
-        ExprResult ValER = B.buildFieldAccess(
-            ChildCastER.get(), true, Slot.ChildResultField, SourceLocation());
-        if (ValER.isInvalid()) return {};
-        ExprResult AssignER = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_Assign, LHS, asRValue(ValER.get()));
-        if (AssignER.isInvalid()) return {};
-
-        SmallVector<Expr*, 1> ReleaseChildTidLookupArgs = {
-            asRValue(buildVarRef(IVar))};
-        Expr *ReleaseChildTid = buildCall(GetResultHandleChildTidFn,
-                                          ReleaseChildTidLookupArgs);
-        if (!ReleaseChildTid) return {};
-        SmallVector<Expr*, 1> ReleaseChildTidArgs = {ReleaseChildTid};
-        Expr *ReleaseCall = buildCall(ReleaseTaskIdFn, ReleaseChildTidArgs);
-        if (!ReleaseCall) return {};
-        SmallVector<Stmt*, 2> CopyAndRelease = {AssignER.get(), ReleaseCall};
-        CompoundStmt *CopyAndReleaseCS = CompoundStmt::Create(
-            Ctx, CopyAndRelease, FPOptionsOverride(), SourceLocation(),
-            SourceLocation());
-
-        IfStmt *CopyIf = IfStmt::Create(
-            Ctx, SourceLocation(), IfStatementKind::Ordinary, nullptr, nullptr,
-            KindCondER.get(), SourceLocation(), SourceLocation(),
-            CopyAndReleaseCS,
-            SourceLocation(), nullptr);
-        ForStmt *Loop = new (Ctx) ForStmt(
-            Ctx, InitStmt, CondER.get(), nullptr, Inc, CopyIf,
-            SourceLocation(), SourceLocation(), SourceLocation());
-        ResultAssignments.push_back(Loop);
-        continue;
-      }
-
-      if (!Slot.LHSDecl) continue;
-
-      Expr *ChildTaskId = nullptr;
-      if (Slot.ChildTidField) {
-        ExprResult ChildTidER =
-            B.buildFieldAccess(B.buildSelfRef(), /*IsArrow=*/true,
-                               Slot.ChildTidField, SourceLocation());
-        if (ChildTidER.isInvalid()) return {};
-        ChildTaskId = asRValue(ChildTidER.get());
-      } else {
-        // child_tid = __gtap_get_child_task_id(tid, idx)
-        SmallVector<Expr*, 2> GetChildIdArgs;
-        GetChildIdArgs.push_back(asRValue(buildParamLValue(TidParam)));
-        GetChildIdArgs.push_back(IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), Slot.ChildIndex), IntTy, SourceLocation()));
-
-        ExprResult GetChildIdCallee = SemaRef.BuildDeclRefExpr(
-            GetChildTaskIdFn, GetChildTaskIdFn->getType(), VK_LValue, SourceLocation());
-        if (GetChildIdCallee.isInvalid()) return {};
-
-        ExprResult ChildTaskIdER = SemaRef.BuildCallExpr(
-            nullptr, GetChildIdCallee.get(), SourceLocation(), GetChildIdArgs, SourceLocation());
-        if (ChildTaskIdER.isInvalid()) return {};
-        ChildTaskId = ChildTaskIdER.get();
-      }
-
-      // data_ptr = __gtap_get_task_data(child_tid)
-      SmallVector<Expr*, 1> GetDataArgs = { ChildTaskId };
-      ExprResult GetDataCallee = SemaRef.BuildDeclRefExpr(
-          GetTaskDataFn, GetTaskDataFn->getType(), VK_LValue, SourceLocation());
-      if (GetDataCallee.isInvalid()) return {};
-      ExprResult DataPtrER = SemaRef.BuildCallExpr(
-          nullptr, GetDataCallee.get(), SourceLocation(), GetDataArgs, SourceLocation());
-      if (DataPtrER.isInvalid()) return {};
-      Expr *DataPtr = DataPtrER.get();
-
-      // cast
-      QualType ChildPtrTy = Ctx.getPointerType(Slot.ChildTaskRecordTy);
-      TypeSourceInfo *TSI = Ctx.getTrivialTypeSourceInfo(ChildPtrTy);
-      ExprResult CastER = SemaRef.BuildCStyleCastExpr(SourceLocation(), TSI, SourceLocation(), DataPtr);
-      if (CastER.isInvalid()) return {};
-      Expr *ChildTypedPtr = CastER.get();
-
-      // value
-      ExprResult ValER = B.buildFieldAccess(ChildTypedPtr, true, Slot.ChildResultField, SourceLocation());
-      if (ValER.isInvalid()) return {};
-      Expr *Val = ValER.get();
-
-      // LHS: if captured: self->field, otherwise: DeclRef
-      Expr *LHS = nullptr;
-      const auto *Canon = dyn_cast<ValueDecl>(Slot.LHSDecl->getCanonicalDecl());
-      if (auto FM = FieldMap.find(Canon); FM != FieldMap.end()) {
-        FieldDecl *Field = FM->second;
-        ExprResult LHSER =
-            buildStateMachineCapturedFieldAccess(Field, SourceLocation());
-        if (LHSER.isInvalid()) return {};
-        LHS = LHSER.get();
-      } else {
-        LHS = DeclRefExpr::Create(Ctx, NestedNameSpecifierLoc(), SourceLocation(),
-                                  const_cast<ValueDecl*>(Canon),
-                                  false, SourceLocation(), Canon->getType(), VK_LValue);
-      }
-
-      ExprResult AssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, LHS, asRValue(Val));
-      if (AssignER.isInvalid()) return {};
-      ResultAssignments.push_back(AssignER.get());
-
-      Expr *ReleaseChildTaskId = nullptr;
-      if (Slot.ChildTidField) {
-        ExprResult ReleaseChildTidER =
-            B.buildFieldAccess(B.buildSelfRef(), /*IsArrow=*/true,
-                               Slot.ChildTidField, SourceLocation());
-        if (ReleaseChildTidER.isInvalid()) return {};
-        ReleaseChildTaskId = asRValue(ReleaseChildTidER.get());
-      } else {
-        SmallVector<Expr*, 2> ReleaseGetChildIdArgs;
-        ReleaseGetChildIdArgs.push_back(asRValue(buildParamLValue(TidParam)));
-        ReleaseGetChildIdArgs.push_back(IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), Slot.ChildIndex),
-            IntTy, SourceLocation()));
-        ExprResult ReleaseGetChildIdCallee = SemaRef.BuildDeclRefExpr(
-            GetChildTaskIdFn, GetChildTaskIdFn->getType(), VK_LValue,
-            SourceLocation());
-        if (ReleaseGetChildIdCallee.isInvalid()) return {};
-        ExprResult ReleaseChildTaskIdER = SemaRef.BuildCallExpr(
-            nullptr, ReleaseGetChildIdCallee.get(), SourceLocation(),
-            ReleaseGetChildIdArgs, SourceLocation());
-        if (ReleaseChildTaskIdER.isInvalid()) return {};
-        ReleaseChildTaskId = ReleaseChildTaskIdER.get();
-      }
-      SmallVector<Expr*, 1> ReleaseArgs = {ReleaseChildTaskId};
-      Expr *ReleaseCall = buildCall(ReleaseTaskIdFn, ReleaseArgs);
-      if (!ReleaseCall) return {};
-      ResultAssignments.push_back(ReleaseCall);
-    }
-    if (HasDynamicResultHandles) {
-      SmallVector<Expr*, 1> ClearArgs = {
-          asRValue(buildParamLValue(TidParam))};
-      Expr *ClearCall = buildCall(ClearResultHandlesFn, ClearArgs);
-      if (!ClearCall) return {};
-      ResultAssignments.push_back(ClearCall);
-    }
-    return ResultAssignments;
-  };
-
   // judge if the last statement is return
   auto endsWithReturnDeep = [&](auto&& self, Stmt *S) -> bool {
     if (!S) return false;
@@ -2429,10 +2022,6 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
             tailRaw.push_back(bodyVec[j]);
 
           SmallVector<Stmt*, 32> resumeBodyStmts;
-          if (waitId < SlotsByWait.size()) {
-            auto assigns = generateResultRetrievalForSlots(SlotsByWait[waitId]);
-            resumeBodyStmts.append(assigns.begin(), assigns.end());
-          }
           resumeBodyStmts.append(tailRaw.begin(), tailRaw.end());
 
           // resume body may contain another taskwait, so recurse inject here
@@ -2543,13 +2132,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
     SmallVector<Stmt*, 64> CaseStmts;
 
-    // (A) stage entrance: result retrieval if needed
-    if (St.ResumeWaitId >= 0 && (size_t)St.ResumeWaitId < SlotsByWait.size()) {
-      auto assigns = generateResultRetrievalForSlots(SlotsByWait[St.ResumeWaitId]);
-      CaseStmts.append(assigns.begin(), assigns.end());
-    }
-
-    // (B) stage body: inject nested taskwait only here
+    // Stage body: inject nested taskwait only here
     {
       CompoundStmt *StageRawCS = CompoundStmt::Create(
           Ctx, St.Body, FPOptionsOverride(),
