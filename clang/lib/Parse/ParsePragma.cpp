@@ -261,31 +261,10 @@ struct PragmaGTaPHandler
   }
   
 private:
-  static bool isBlockWorkerMacroDefined(Preprocessor &PP) {
-    IdentifierInfo *II = PP.getIdentifierInfo("__GTAP_WORKER_IS_BLOCK");
-    return PP.isMacroDefined(II);
-  }
-
-  static bool parseIntLiteralToken(Preprocessor &PP, Token &Tok, int64_t &Out) {
-    if (!Tok.is(tok::numeric_constant))
-      return false;
-    std::string Sp = PP.getSpelling(Tok);
-    char *End = nullptr;
-    long long V = strtoll(Sp.c_str(), &End, 0);
-    if (!End || *End != '\0')
-      return false;
-    Out = static_cast<int64_t>(V);
-    return true;
-  }
-  
   void HandleGTaPFunctionPragma(Preprocessor &PP, SourceLocation PragmaLoc) {
     Token Tok;
     // 'function' token was already consumed by HandlePragma
     PP.Lex(Tok); // Get next token
-
-    // Optional: return_thread(<int>)  (only when __GTAP_WORKER_IS_BLOCK is defined)
-    bool HasReturnThread = false;
-    int64_t ReturnThread = 0;
 
     while (Tok.is(tok::identifier)) {
       StringRef Name = Tok.getIdentifierInfo()->getName();
@@ -312,42 +291,6 @@ private:
         continue;
       }
 
-      if (Name == "return_thread") {
-        if (!isBlockWorkerMacroDefined(PP)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected)
-              << "return_thread requires __GTAP_WORKER_IS_BLOCK";
-          while (!Tok.is(tok::eod)) PP.Lex(Tok);
-          return;
-        }
-        PP.Lex(Tok); // consume 'return_thread'
-
-        if (!Tok.is(tok::l_paren)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
-          return;
-        }
-        PP.Lex(Tok); // consume '('
-
-        int64_t V = 0;
-        if (!parseIntLiteralToken(PP, Tok, V)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << "integer literal";
-          return;
-        }
-        if (V < 0) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << "non-negative integer";
-          return;
-        }
-        PP.Lex(Tok); // consume number
-
-        if (!Tok.is(tok::r_paren)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
-          return;
-        }
-        PP.Lex(Tok); // consume ')'
-
-        HasReturnThread = true;
-        ReturnThread = V;
-        continue;
-      }
       // Unknown clause name -> stop and let "extra tokens" warning handle it
       break;
     }
@@ -359,9 +302,6 @@ private:
     }
 
     Actions.GTaP().PendingFunctionPragmaLoc = PragmaLoc;
-    if (HasReturnThread) {
-      Actions.GTaP().PendingFunctionReturnThread = ReturnThread;
-    }
   }
 };
 

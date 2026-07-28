@@ -91,13 +91,11 @@ public:
   // Clear the pending GTaP function pragma
   void clearPendingGTaPFunctionPragma() {
     PendingFunctionPragmaLoc = SourceLocation();
-    PendingFunctionReturnThread = 0;
   }
 
   // Pending function pragma: set by #pragma gtap function at file scope
   // Made public so PragmaHandler can set it directly
   SourceLocation PendingFunctionPragmaLoc;
-  unsigned PendingFunctionReturnThread = 0;
 
   /// Check if we are currently inside a GTaP entry directive.
   bool isInGTaPEntryDirective() const {

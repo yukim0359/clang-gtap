@@ -37,14 +37,13 @@ struct GTaPTaskFunctionInfo {
   bool TaskRecordInvalid = false;
   std::vector<FieldDecl *> ParameterFields;
   std::vector<FieldDecl *> CapturedFields;
-  std::vector<FieldDecl *> ChildTidFields;
   FieldDecl *StateField = nullptr;
   FieldDecl *ResultField = nullptr;
-  unsigned ScalarResultTaskCount = 0;
+  FieldDecl *ResultDstField = nullptr;
+  FieldDecl *SpawningThreadField = nullptr;
   llvm::DenseSet<const VarDecl*> SpillSet;
   llvm::DenseSet<const VarDecl*> HoistOnlySet;
   FunctionDecl *StateMachineFD = nullptr;
-  unsigned ReturnThread = 0;  // Thread index for result write guard (when worker_size is block)
 };
 
 struct UseDef {
