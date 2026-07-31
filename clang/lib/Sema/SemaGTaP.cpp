@@ -482,6 +482,20 @@ public:
     return Member;
   }
 
+  ExprResult TransformCallExpr(CallExpr *Call) {
+    if (!InTaskDirective) {
+      if (const FunctionDecl *Callee = Call->getDirectCallee()) {
+        if (Base::getSema().GTaP().isGTaPTaskFunction(Callee)) {
+          Base::getSema().Diag(Call->getExprLoc(),
+                              diag::err_gtap_direct_task_function_call)
+              << Callee;
+          return ExprError();
+        }
+      }
+    }
+    return Base::TransformCallExpr(Call);
+  }
+
   // For debug; unnecessary any more
   // StmtResult TransformWhileStmt(WhileStmt *WS) {
   //   llvm::errs() << "[VR] TransformWhileStmt\n";
@@ -1181,6 +1195,49 @@ static Expr *defaultQueueExpr(ASTContext &Ctx, SourceLocation Loc) {
                                 Ctx.IntTy, Loc);
 }
 
+static bool diagnoseNestedGTaPTaskFunctionCalls(Sema &S, Stmt *Root,
+                                                const CallExpr *AllowedCall) {
+  class NestedCallVisitor
+      : public RecursiveASTVisitor<NestedCallVisitor> {
+  public:
+    NestedCallVisitor(Sema &S, const CallExpr *AllowedCall)
+        : S(S), AllowedCall(AllowedCall) {}
+
+    bool VisitCallExpr(CallExpr *Call) {
+      if (Call == AllowedCall)
+        return true;
+      if (const FunctionDecl *Callee = Call->getDirectCallee()) {
+        if (S.GTaP().isGTaPTaskFunction(Callee)) {
+          S.Diag(Call->getExprLoc(), diag::err_gtap_direct_task_function_call)
+              << Callee;
+          Invalid = true;
+        }
+      }
+      return true;
+    }
+
+    bool isInvalid() const { return Invalid; }
+
+  private:
+    Sema &S;
+    const CallExpr *AllowedCall;
+    bool Invalid = false;
+  } Visitor(S, AllowedCall);
+
+  Visitor.TraverseStmt(Root);
+  return Visitor.isInvalid();
+}
+
+static CallExpr *getGTaPAssociatedCall(Stmt *S) {
+  if (auto *BO = dyn_cast_or_null<BinaryOperator>(S)) {
+    if (BO->getOpcode() == BO_Assign)
+      return dyn_cast<CallExpr>(BO->getRHS()->IgnoreParenImpCasts());
+  }
+  if (auto *E = dyn_cast_or_null<Expr>(S))
+    return dyn_cast<CallExpr>(E->IgnoreParenImpCasts());
+  return nullptr;
+}
+
 StmtResult SemaGTaP::ActOnGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc,
                                           SourceLocation EndLoc, Expr *QueueExpr) {
   if (!AStmt)
@@ -1188,7 +1245,9 @@ StmtResult SemaGTaP::ActOnGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc
 
   ASTContext &Ctx = getASTContext();
   Expr *Q = QueueExpr ? QueueExpr : defaultQueueExpr(Ctx, StartLoc);
-  // TODO: Add semantic checks here.
+  CallExpr *SpawnCall = getGTaPAssociatedCall(AStmt);
+  if (diagnoseNestedGTaPTaskFunctionCalls(SemaRef, AStmt, SpawnCall))
+    return StmtError();
 
   return GTaPTaskDirective::Create(getASTContext(), StartLoc, EndLoc, AStmt, Q);
 }
@@ -1213,6 +1272,7 @@ FunctionDecl* SemaGTaP::getOrCreateStateMachineFunction(FunctionDecl *UserFD,
                                                        QualType VoidPtrTy,
                                                        QualType IntTy,
                                                        QualType TaskCtxPtrTy) {
+  UserFD = UserFD->getCanonicalDecl();
   auto &TI = CachedTaskInfos[UserFD];
   if (TI.StateMachineFD) return TI.StateMachineFD;
 
@@ -1311,6 +1371,9 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     SemaRef.Diag(StartLoc, diag::err_gtap_entry_invalid_statement);
     return StmtError();
   }
+
+  if (diagnoseNestedGTaPTaskFunctionCalls(SemaRef, AStmt, EntryCall))
+    return StmtError();
   
   FunctionDecl *CalleeDecl = EntryCall->getDirectCallee();
   if (!CalleeDecl) {
@@ -1518,7 +1581,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       &FuncPtrId, FuncPtrType, Ctx.getTrivialTypeSourceInfo(FuncPtrType),
       SC_None);
 
-  FunctionDecl *StateMachineFD = CachedTaskInfos[CalleeDecl].StateMachineFD;
+  FunctionDecl *StateMachineFD =
+      CachedTaskInfos[CalleeDecl->getCanonicalDecl()].StateMachineFD;
   if (!StateMachineFD) StateMachineFD = getOrCreateStateMachineFunction(CalleeDecl, VoidTy, VoidPtrTy, IntTy, TaskCtxPtrTy);
   ExprResult CalleeRefER = SemaRef.BuildDeclRefExpr(StateMachineFD, StateMachineFD->getType(), VK_LValue, StartLoc);
   if (CalleeRefER.isInvalid()) return StmtError();
@@ -1821,7 +1885,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   return StmtResult(FallbackBlock);
 }
 
-void SemaGTaP::ActOnStartOfFunctionDef(FunctionDecl *FD) {
+void SemaGTaP::ActOnFunctionDeclaration(FunctionDecl *FD) {
   if (!FD) return;
     
   // Check if there is a pending GTaP function pragma
@@ -1832,6 +1896,23 @@ void SemaGTaP::ActOnStartOfFunctionDef(FunctionDecl *FD) {
     
     // Clear the pending pragma
     clearPendingGTaPFunctionPragma();
+  }
+}
+
+void SemaGTaP::ActOnStartOfFunctionDef(FunctionDecl *FD) {
+  ActOnFunctionDeclaration(FD);
+
+  // A pragma attached to an earlier declaration may not have participated in
+  // Clang's normal attribute merge because it is installed after that
+  // declaration has been built.  Materialize it on the definition so the
+  // definition is transformed like an inline-annotated task function.
+  if (FD && !FD->hasAttr<GTaPFunctionAttr>()) {
+    for (FunctionDecl *Redecl : FD->redecls()) {
+      if (auto *A = Redecl->getAttr<GTaPFunctionAttr>()) {
+        FD->addAttr(A->clone(getASTContext()));
+        break;
+      }
+    }
   }
 }
 
@@ -1854,14 +1935,16 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   GTaPTaskFunctionAnalyzer Analyzer(Ctx, FD);
   GTaPTaskFunctionInfo TaskInfo = Analyzer.analyze(Body);
-  CachedTaskInfos[FD] = TaskInfo;
+  FunctionDecl *CacheKey = FD->getCanonicalDecl();
+  CachedTaskInfos[CacheKey] = TaskInfo;
 
   // llvm::errs() << "[GTaP][Sema]  TaskInfo: params=" << TaskInfo.Parameters.size()
   //              << " captured=" << TaskInfo.CapturedVariables.size()
   //              << " directives=" << TaskInfo.Directives.size() << "\n";
 
   llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
-  RecordDecl *TaskRecord = createTaskDataRecord(SemaRef, FD, CachedTaskInfos[FD], FieldMap);
+  RecordDecl *TaskRecord = createTaskDataRecord(
+      SemaRef, FD, CachedTaskInfos[CacheKey], FieldMap);
   if (!TaskRecord)
     return StmtError();
 
@@ -1932,9 +2015,9 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // transform body
   GTaPExprBuilder B(SemaRef, SelfTypedVar);
   GTaPTaskBodyTransformer Transformer(
-      SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[FD].ResultField,
-      CachedTaskInfos[FD].ResultDstField,
-      CachedTaskInfos[FD].SpawningThreadField,
+      SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[CacheKey].ResultField,
+      CachedTaskInfos[CacheKey].ResultDstField,
+      CachedTaskInfos[CacheKey].SpawningThreadField,
       TidParam, CtxParam, FinishFn, ChildCountVar, IsBlockWorker);
   StmtResult Transformed = Transformer.TransformStmt(Body);
   if (Transformed.isInvalid())
@@ -2101,7 +2184,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // copies that element into its private slot.  This deliberately runs only in
   // state 0: repeating it after a taskwait would overwrite parameter mutations.
   auto buildBlockArgumentBroadcast = [&]() -> Stmt * {
-    GTaPTaskFunctionInfo &TI = CachedTaskInfos[FD];
+    GTaPTaskFunctionInfo &TI = CachedTaskInfos[CacheKey];
     if (!IsBlockWorker || !TI.SpawningThreadField ||
         TI.ParameterFields.empty())
       return nullptr;

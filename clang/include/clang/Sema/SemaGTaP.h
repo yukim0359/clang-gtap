@@ -80,8 +80,22 @@ public:
                                      Stmt *AStmt);
 
   // Called on well-formed '#pragma gtap function'.
+  // Called after parsing a function declaration to consume a pending pragma.
+  void ActOnFunctionDeclaration(FunctionDecl *FD);
+
   // Called when ActOnStartOfFunctionDef to attach pending GTaP function attribute
   void ActOnStartOfFunctionDef(FunctionDecl *FD);
+
+  /// Return true if any declaration in the function's redeclaration chain is
+  /// marked as a GTaP task function.
+  bool isGTaPTaskFunction(const FunctionDecl *FD) const {
+    if (!FD)
+      return false;
+    for (const FunctionDecl *Redecl : FD->redecls())
+      if (Redecl->hasAttr<GTaPFunctionAttr>())
+        return true;
+    return false;
+  }
 
   // Check if there is a pending GTaP function pragma
   bool hasPendingGTaPFunctionPragma() const {
@@ -114,12 +128,28 @@ public:
     InGTaPEntryDirective = false;
   }
 
+  /// Check whether the associated statement of a GTaP task directive is
+  /// currently being parsed.  Direct calls to task functions are valid only
+  /// in this context (or in an entry directive).
+  bool isInGTaPTaskDirective() const { return InGTaPTaskDirective; }
+
+  void pushGTaPTaskDirective() {
+    assert(!InGTaPTaskDirective && "nested GTaP task directives are not allowed");
+    InGTaPTaskDirective = true;
+  }
+
+  void popGTaPTaskDirective() {
+    assert(InGTaPTaskDirective && "GTaP task directive flag underflow");
+    InGTaPTaskDirective = false;
+  }
+
   /// Transform a user-authored GTaP task function into its state-machine-driven
   /// representation at the AST level.
   StmtResult TransformTaskFunctionBody(FunctionDecl *FD, CompoundStmt *Body);
 
   /// Get cached task info for a function (for use in TransformGTaPTaskDirective)
   GTaPTaskFunctionInfo &getCachedTaskInfo(FunctionDecl *FD) {
+    FD = FD->getCanonicalDecl();
     // Create if it doesn't exist
     if (CachedTaskInfos.find(FD) == CachedTaskInfos.end()) {
       ASTContext &Ctx = getASTContext();
@@ -145,6 +175,10 @@ private:
   
   /// Flag indicating if we are currently inside a GTaP entry directive.
   bool InGTaPEntryDirective = false;
+
+  /// Flag indicating that a '#pragma gtap task' associated statement is being
+  /// parsed.
+  bool InGTaPTaskDirective = false;
 
   /// Cache of analysed task functions, keyed by the original declaration.
   llvm::DenseMap<const FunctionDecl *, GTaPTaskFunctionInfo> CachedTaskInfos;

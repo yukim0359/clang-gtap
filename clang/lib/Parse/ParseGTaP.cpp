@@ -110,6 +110,10 @@ StmtResult Parser::ParseGTaPExecutableDirective() {
   //   result = fib(n);
   Stmt *AStmt = nullptr;
   if (DKind == GTaPDirectiveKind::GTaPD_task || DKind == GTaPDirectiveKind::GTaPD_entry) {
+    if (DKind == GTaPDirectiveKind::GTaPD_task) {
+      getActions().GTaP().pushGTaPTaskDirective();
+    }
+
     // For entry directive, increment depth before parsing to allow host->device calls
     if (DKind == GTaPDirectiveKind::GTaPD_entry) {
       getActions().GTaP().pushGTaPEntryDirective();
@@ -137,6 +141,9 @@ StmtResult Parser::ParseGTaPExecutableDirective() {
     // Decrement depth after parsing
     if (DKind == GTaPDirectiveKind::GTaPD_entry) {
       getActions().GTaP().popGTaPEntryDirective();
+    }
+    if (DKind == GTaPDirectiveKind::GTaPD_task) {
+      getActions().GTaP().popGTaPTaskDirective();
     }
     
     // For entry directive, accept the statement even if it has errors

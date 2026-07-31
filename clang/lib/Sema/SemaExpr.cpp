@@ -6835,6 +6835,17 @@ ExprResult Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
   FunctionDecl *FDecl = dyn_cast_or_null<FunctionDecl>(NDecl);
   unsigned BuiltinID = (FDecl ? FDecl->getBuiltinID() : 0);
 
+  // C++ calls normally reach this common path after overload resolution,
+  // bypassing the direct-declaration branch in BuildCallExpr.  Diagnose here
+  // so calls from both ordinary device functions and task functions are
+  // covered, while calls associated with task/entry directives remain valid.
+  if (FDecl && GTaP().isGTaPTaskFunction(FDecl) &&
+      !GTaP().isInGTaPTaskDirective() &&
+      !GTaP().isInGTaPEntryDirective()) {
+    Diag(Fn->getExprLoc(), diag::err_gtap_direct_task_function_call) << FDecl;
+    return ExprError();
+  }
+
   // Functions with 'interrupt' attribute cannot be called directly.
   if (FDecl) {
     if (FDecl->hasAttr<AnyX86InterruptAttr>()) {

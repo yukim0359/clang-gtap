@@ -6162,6 +6162,16 @@ Decl *Sema::ActOnDeclarator(Scope *S, Declarator &D) {
 
   Decl *Dcl = HandleDeclarator(S, D, MultiTemplateParamsArg());
 
+  if (Dcl && GTaP().hasPendingGTaPFunctionPragma()) {
+    FunctionDecl *FD = nullptr;
+    if (auto *FTD = dyn_cast<FunctionTemplateDecl>(Dcl))
+      FD = FTD->getTemplatedDecl();
+    else
+      FD = dyn_cast<FunctionDecl>(Dcl);
+    if (FD)
+      GTaP().ActOnFunctionDeclaration(FD);
+  }
+
   if (OriginalLexicalContext && OriginalLexicalContext->isObjCContainer() &&
       Dcl && Dcl->getDeclContext()->isFileContext())
     Dcl->setTopLevelDeclInObjCContainer();

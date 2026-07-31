@@ -183,6 +183,8 @@ def err_gtap_taskwait_with_no_taskwait : Error<
   "#pragma gtap taskwait cannot be used with -fgtap-no-taskwait or GTAP_ASSUME_NO_TASKWAIT">;
 def err_gtap_task_invalid_statement : Error<
   "#pragma gtap task must be followed by a direct call to a GTaP task function or an assignment from such a call">;
+def err_gtap_direct_task_function_call : Error<
+  "direct call to GTaP task function %0 is not supported; use '#pragma gtap task' to spawn it">;
 def err_gtap_taskwait_in_switch : Error<
   "#pragma gtap taskwait inside a switch statement is not supported">;
 def err_gtap_entry_invalid_statement : Error<
