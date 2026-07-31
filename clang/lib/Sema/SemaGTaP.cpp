@@ -299,7 +299,26 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
-      FieldDecl *Field = addField(RD, FieldName, Param->getType());
+      QualType FieldTy = Param->getType();
+      const bool IsUniformBlockParameter =
+          IsBlockWorker && FieldTy.isConstQualified();
+      // A top-level const parameter cannot change during the task's lifetime,
+      // so all CUDA threads in a block task may read the single value supplied
+      // by the spawning thread.  Strip only the top-level qualifier from the
+      // storage type so spawn/entry initialization remains assignable; nested
+      // qualifiers such as the pointee const in `const T *const` are retained.
+      if (IsUniformBlockParameter)
+        FieldTy = FieldTy.getUnqualifiedType();
+      // A block task is resumed collectively, so an ordinary CUDA function
+      // parameter must retain one value per thread.  The argument expression
+      // is evaluated once by the spawning thread; state 0 of the child then
+      // expands that value into the other elements of this array.
+      if (IsBlockWorker && !IsUniformBlockParameter) {
+        FieldTy = Ctx.getConstantArrayType(
+            FieldTy, llvm::APInt(64, WorkerSize), nullptr,
+            ArraySizeModifier::Normal, 0);
+      }
+      FieldDecl *Field = addField(RD, FieldName, FieldTy);
       TaskInfo.ParameterFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(Param->getCanonicalDecl())] = Field;
     }
@@ -337,6 +356,13 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     TaskInfo.ResultField = nullptr;
     TaskInfo.ResultDstField = nullptr;
     TaskInfo.SpawningThreadField = nullptr;
+    // Block tasks are entered collectively, even though a task directive is
+    // encountered by one CUDA thread.  Remember that thread so the callee can
+    // expand its argument values into the per-thread parameter slots when it
+    // first starts executing.
+    if (IsBlockWorker)
+      TaskInfo.SpawningThreadField =
+          addField(RD, "__gtap_spawning_thread", Ctx.IntTy);
     if (!TaskInfo.ReturnType.isNull() && !TaskInfo.ReturnType->isVoidType()) {
       if (!checkTaskDataFieldTypeOrDiag(S, FD->getLocation(), "__gtap_result",
                                         TaskInfo.ReturnType)) {
@@ -347,9 +373,6 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       TaskInfo.ResultDstField = addField(
           RD, "__gtap_result_dst",
           Ctx.getPointerType(TaskInfo.ReturnType));
-      if (IsBlockWorker)
-        TaskInfo.SpawningThreadField =
-            addField(RD, "__gtap_spawning_thread", Ctx.IntTy);
     }
 
     RD->completeDefinition();
@@ -390,6 +413,7 @@ class GTaPTaskBodyTransformer
   ParmVarDecl *CtxParam;
   FunctionDecl *FinishDecl;
   VarDecl *ChildCountVar;  // Function-level child_count variable
+  bool IsBlockWorker;
   unsigned NextWaitId = 0;
 
   bool InTaskDirective;
@@ -400,14 +424,15 @@ public:
                          FieldDecl *ResultDstField,
                          FieldDecl *SpawningThreadField,
                          ParmVarDecl *TidParam, ParmVarDecl *CtxParam,
-                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar)
+                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar,
+                         bool IsBlockWorker)
       : Base(S), B(B), Ctx(S.getASTContext()), SelfDecl(SelfDecl),
         FieldMap(std::move(FieldMap)), ResultField(ResultField),
         ResultDstField(ResultDstField),
         SpawningThreadField(SpawningThreadField),
         TidParam(TidParam), CtxParam(CtxParam),
         FinishDecl(FinishDecl), ChildCountVar(ChildCountVar),
-        InTaskDirective(false) {}
+        IsBlockWorker(IsBlockWorker), InTaskDirective(false) {}
 
   // Generic hooks: log every statement we are about to transform.
   // We must preserve both overloads from TreeTransform:
@@ -490,6 +515,32 @@ public:
         if (!NewInitExpr) {
           continue;
         }
+
+        // Arrays are not assignable.  Keep the initialized local array as a
+        // temporary and copy its complete object representation into the task
+        // record.  Subsequent references are still rewritten to the field.
+        if (Ctx.getAsConstantArrayType(VD->getType())) {
+          if (NewInitExpr != VD->getInit())
+            VD->setInit(NewInitExpr);
+          KeepDecls.push_back(VD);
+
+          ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
+          if (LHSER.isInvalid()) return StmtError();
+          Expr *To = buildAddressAsVoidPointer(LHSER.get(), /*IsConst=*/false);
+          Expr *From = buildAddressAsVoidPointer(
+              buildDeclRefLValue(VD), /*IsConst=*/true);
+          QualType SizeTy = Ctx.getSizeType();
+          CharUnits ArraySize = Ctx.getTypeSizeInChars(VD->getType());
+          Expr *Size = IntegerLiteral::Create(
+              Ctx,
+              llvm::APInt(Ctx.getTypeSize(SizeTy), ArraySize.getQuantity()),
+              SizeTy, SourceLocation());
+          Expr *CopyArgs[] = {To, From, Size};
+          Stmts.push_back(SemaRef.BuildBuiltinCallExpr(
+              SourceLocation(), Builtin::BI__builtin_memcpy, CopyArgs));
+          continue;
+        }
+
         ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
         if (LHSER.isInvalid()) return StmtError();
         Expr *LHS = LHSER.get();
@@ -917,10 +968,35 @@ public:
               ExprResult FieldRefER = B.buildFieldAccess(buildTaskPtrRef(), /*IsArrow=*/true, Field, SourceLocation());
               if (FieldRefER.isInvalid()) return StmtError();
               Expr *FieldRef = FieldRefER.get();
-              ExprResult AssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, FieldRef, TransformedArg.get());
-              if (AssignER.isInvalid()) return StmtError();
-              Expr *Assign = AssignER.get();
-              TaskStmts.push_back(Assign);
+              const bool IsPerThreadBlockField =
+                  IsBlockWorker && Ctx.getAsConstantArrayType(Field->getType());
+              if (!IsPerThreadBlockField) {
+                ExprResult AssignER = SemaRef.BuildBinOp(
+                    nullptr, SourceLocation(), BO_Assign, FieldRef,
+                    TransformedArg.get());
+                if (AssignER.isInvalid()) return StmtError();
+                TaskStmts.push_back(AssignER.get());
+              } else {
+                // Store only the spawning thread's parameter value.  State 0
+                // of the child expands this value into the other per-thread
+                // slots collectively.
+                Expr *ThreadIdxX = buildThreadIdxXExpr(
+                    SemaRef, SourceLocation());
+                if (!ThreadIdxX)
+                  return StmtError();
+                Expr *Indices[] = {ThreadIdxX};
+                ExprResult Element = SemaRef.ActOnArraySubscriptExpr(
+                    nullptr, FieldRef, SourceLocation(),
+                    MultiExprArg(Indices, 1), SourceLocation());
+                if (Element.isInvalid())
+                  return StmtError();
+                ExprResult Assign = SemaRef.BuildBinOp(
+                    nullptr, SourceLocation(), BO_Assign, Element.get(),
+                    TransformedArg.get());
+                if (Assign.isInvalid())
+                  return StmtError();
+                TaskStmts.push_back(Assign.get());
+              }
             }
           }
         }
@@ -977,6 +1053,17 @@ public:
   }
 
 private:
+  Expr *buildAddressAsVoidPointer(Expr *E, bool IsConst) const {
+    QualType PointerTy = Ctx.getPointerType(E->getType());
+    Expr *Address = UnaryOperator::Create(
+        Ctx, E, UO_AddrOf, PointerTy, VK_PRValue, OK_Ordinary,
+        SourceLocation(), false, SemaRef.CurFPFeatureOverrides());
+    QualType VoidTy = IsConst ? Ctx.getConstType(Ctx.VoidTy) : Ctx.VoidTy;
+    return ImplicitCastExpr::Create(
+        Ctx, Ctx.getPointerType(VoidTy), CK_BitCast, Address, nullptr,
+        VK_PRValue, FPOptionsOverride());
+  }
+
   Expr *buildDeclRefLValue(ValueDecl *D) const {
     return DeclRefExpr::Create(Ctx, NestedNameSpecifierLoc(), SourceLocation(),
                                D, /*RefersToEnclosingVariableOrCapture=*/false,
@@ -1002,7 +1089,10 @@ private:
       return ExprError();
 
     Expr *Member = MemberER.get();
-    if (!Ctx.getAsConstantArrayType(Field->getType()))
+    // Block-mode captures have an extra outer [GTAP_BLOCK_SIZE] dimension;
+    // select the current thread's object.  A source-level array in thread mode
+    // is the captured object itself and must remain an array lvalue.
+    if (!IsBlockWorker || !Ctx.getAsConstantArrayType(Field->getType()))
       return Member;
 
     Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, Loc);
@@ -1264,6 +1354,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Create helper function to build task pointer declaration and initialization
   QualType IntTy = Ctx.IntTy;
   QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
+  const bool IsBlockWorker =
+      isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
   std::string TaskPtrName = "__gtap_task_ptr_" + FuncName;
   
   FunctionDecl *GetTaskDataFn = requireRuntimeFunction(SemaRef, "__gtap_get_task_data", StartLoc);
@@ -1335,12 +1427,25 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       if (FieldAccessER.isInvalid()) return StmtError();
       Expr *FieldAccess = FieldAccessER.get();
 
-      // Create assignment
-      ExprResult AssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, FieldAccess, Arg);
-      if (AssignER.isInvalid()) return StmtError();
-      Expr *Assign = AssignER.get();
-      
-      DeviceStmts.push_back(Assign);
+      const bool IsPerThreadBlockField =
+          IsBlockWorker && Ctx.getAsConstantArrayType(Field->getType());
+      if (!IsPerThreadBlockField) {
+        ExprResult AssignER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign, FieldAccess, Arg);
+        if (AssignER.isInvalid()) return StmtError();
+        DeviceStmts.push_back(AssignER.get());
+      } else {
+        Expr *Zero = IntegerLiteral::Create(
+            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc);
+        Expr *Indices[] = {Zero};
+        ExprResult Element = SemaRef.ActOnArraySubscriptExpr(
+            nullptr, FieldAccess, StartLoc, MultiExprArg(Indices, 1), EndLoc);
+        if (Element.isInvalid()) return StmtError();
+        ExprResult Assign = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign, Element.get(), Arg);
+        if (Assign.isInvalid()) return StmtError();
+        DeviceStmts.push_back(Assign.get());
+      }
       ++ArgIndex;
     }
     
@@ -1830,7 +1935,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[FD].ResultField,
       CachedTaskInfos[FD].ResultDstField,
       CachedTaskInfos[FD].SpawningThreadField,
-      TidParam, CtxParam, FinishFn, ChildCountVar);
+      TidParam, CtxParam, FinishFn, ChildCountVar, IsBlockWorker);
   StmtResult Transformed = Transformer.TransformStmt(Body);
   if (Transformed.isInvalid())
     return StmtError();
@@ -1990,6 +2095,78 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     stmts.push_back(ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr));
   };
 
+  // A block-task call is issued by one CUDA thread, but its ordinary function
+  // parameters remain per-thread values.  The spawning thread initializes only
+  // its own array element.  On the first invocation, every other worker thread
+  // copies that element into its private slot.  This deliberately runs only in
+  // state 0: repeating it after a taskwait would overwrite parameter mutations.
+  auto buildBlockArgumentBroadcast = [&]() -> Stmt * {
+    GTaPTaskFunctionInfo &TI = CachedTaskInfos[FD];
+    if (!IsBlockWorker || !TI.SpawningThreadField ||
+        TI.ParameterFields.empty())
+      return nullptr;
+
+    SmallVector<Stmt *, 16> Copies;
+    for (FieldDecl *Field : TI.ParameterFields) {
+      if (!Field)
+        continue;
+      // Top-level const parameters use one uniform field for the whole block
+      // and therefore require no state-0 lane broadcast.
+      if (!Ctx.getAsConstantArrayType(Field->getType()))
+        continue;
+
+      ExprResult DstField = B.buildFieldAccess(
+          B.buildSelfRef(), /*IsArrow=*/true, Field, SourceLocation());
+      ExprResult SrcField = B.buildFieldAccess(
+          B.buildSelfRef(), /*IsArrow=*/true, Field, SourceLocation());
+      ExprResult SpawnLane = B.buildFieldAccess(
+          B.buildSelfRef(), /*IsArrow=*/true, TI.SpawningThreadField,
+          SourceLocation());
+      Expr *DstLane = buildThreadIdxXExpr(SemaRef, SourceLocation());
+      if (DstField.isInvalid() || SrcField.isInvalid() ||
+          SpawnLane.isInvalid() || !DstLane)
+        return nullptr;
+
+      Expr *DstIndices[] = {DstLane};
+      Expr *SrcIndices[] = {asRValue(SpawnLane.get())};
+      ExprResult Dst = SemaRef.ActOnArraySubscriptExpr(
+          nullptr, DstField.get(), SourceLocation(),
+          MultiExprArg(DstIndices, 1), SourceLocation());
+      ExprResult Src = SemaRef.ActOnArraySubscriptExpr(
+          nullptr, SrcField.get(), SourceLocation(),
+          MultiExprArg(SrcIndices, 1), SourceLocation());
+      if (Dst.isInvalid() || Src.isInvalid())
+        return nullptr;
+      ExprResult Assign = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, Dst.get(), Src.get());
+      if (Assign.isInvalid())
+        return nullptr;
+      Copies.push_back(Assign.get());
+    }
+
+    if (Copies.empty())
+      return nullptr;
+
+    Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, SourceLocation());
+    ExprResult SpawnLane = B.buildFieldAccess(
+        B.buildSelfRef(), /*IsArrow=*/true, TI.SpawningThreadField,
+        SourceLocation());
+    if (!ThreadIdxX || SpawnLane.isInvalid())
+      return nullptr;
+    ExprResult IsNotSpawner = SemaRef.BuildBinOp(
+        nullptr, SourceLocation(), BO_NE, ThreadIdxX,
+        asRValue(SpawnLane.get()));
+    if (IsNotSpawner.isInvalid())
+      return nullptr;
+
+    CompoundStmt *CopyBody = CompoundStmt::Create(
+        Ctx, Copies, FPOptionsOverride(), SourceLocation(), SourceLocation());
+    return IfStmt::Create(
+        Ctx, SourceLocation(), IfStatementKind::Ordinary,
+        nullptr, nullptr, IsNotSpawner.get(), SourceLocation(),
+        SourceLocation(), CopyBody, SourceLocation(), nullptr);
+  };
+
 
   // inject case at taskwait position
   SwitchCase *CaseList = nullptr;
@@ -2131,6 +2308,10 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     const unsigned stateVal = (St.ResumeWaitId < 0) ? 0u : (unsigned)(St.ResumeWaitId + 1);
 
     SmallVector<Stmt*, 64> CaseStmts;
+
+    if (stateVal == 0)
+      if (Stmt *Broadcast = buildBlockArgumentBroadcast())
+        CaseStmts.push_back(Broadcast);
 
     // Stage body: inject nested taskwait only here
     {
