@@ -10,7 +10,7 @@ This compiler extends Clang so you can write GPU kernels using `#pragma gtap` di
 - **Frontend lowering to CUDA device code**: 
   GTaP constructs are transformed in the Clang frontend into low-level CUDA device code that cooperates with the GTaP runtime.
   In particular, fork-join constructs (e.g. `task` / `taskwait`) are lowered into a state-machine style representation that enables suspension and resumption on GPUs.
-- **CUDA integration**: Compiles to NVPTX; requires CUDA Toolkit and a GTaP runtime.
+- **CUDA integration**: Compiles to `NVPTX`; requires CUDA Toolkit and a GTaP runtime.
 - **Based on LLVM/Clang 21.1.8**: Built on the official LLVM monorepo with minimal, targeted changes to the Clang frontend (parsing, AST, sema).
 
 ## Project layout (GTaP-related)
@@ -29,7 +29,7 @@ This compiler extends Clang so you can write GPU kernels using `#pragma gtap` di
 - C/C++ toolchain (Clang or GCC)
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
 
-We have verified build and basic functionality on a single GH200 node of the [Miyabi-G](https://www.cc.u-tokyo.ac.jp/en/supercomputer/miyabi/service/) supercomputer (1× NVIDIA GH200; Clang 21.1.8, CUDA Toolkit 12.9, Linux kernel 5.14.0-427.13.1.el9_4.aarch64).
+We have verified build and basic functionality on a single GH200 node of the [Miyabi-G](https://www.cc.u-tokyo.ac.jp/en/supercomputer/miyabi/service/) supercomputer (1× NVIDIA GH200; Clang 21.1.8, CUDA Toolkit 12.9, Linux kernel `5.14.0-427.13.1.el9_4.aarch64`).
 
 ## Building
 
@@ -50,7 +50,7 @@ cmake -G Ninja \
   -DCUDA_TOOLKIT_ROOT_DIR=/path/to/cuda
 ```
 
-Adjust `LLVM_TARGETS_TO_BUILD` for your host (e.g. add `X86` for x86_64) and set `CUDA_TOOLKIT_ROOT_DIR` to your CUDA installation. Then:
+Adjust `LLVM_TARGETS_TO_BUILD` for your host (e.g. add `X86` for `x86_64`) and set `CUDA_TOOLKIT_ROOT_DIR` to your CUDA installation. Then:
 
 ```bash
 ninja -C build clang
@@ -62,7 +62,7 @@ The resulting `clang` (and related binaries) will be in `build/bin/`. Use `build
 
 This project is a **derivative of the LLVM Project**. The entire codebase is distributed under the **Apache License v2.0 with LLVM Exceptions**.
 
-- Full license text: [LICENSE.TXT](LICENSE.TXT) (repository root) and [llvm/LICENSE.TXT](llvm/LICENSE.TXT).
+- Full license text: [`LICENSE.TXT`](LICENSE.TXT) (repository root) and [`llvm/LICENSE.TXT`](llvm/LICENSE.TXT).
 
 ## Links
 
