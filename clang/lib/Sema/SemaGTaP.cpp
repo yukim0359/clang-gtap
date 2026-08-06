@@ -598,85 +598,76 @@ public:
             Ctx, RHS->getType(), CK_LValueToRValue, RHS, nullptr, VK_PRValue,
             FPOptionsOverride());
       }
-      
+
       if (!ResultDstField)
         return StmtError();
       ExprResult DstER = B.buildFieldAccess(
           B.buildSelfRef(), true, ResultDstField, SourceLocation());
       if (DstER.isInvalid())
         return StmtError();
-      Expr *DstLHS = UnaryOperator::Create(
-          Ctx, toRValue(DstER.get()), UO_Deref,
-          ResultField->getType(), VK_LValue, OK_Ordinary,
-          SourceLocation(), false, FPOptionsOverride());
-      ExprResult StoreER = SemaRef.BuildBinOp(
-          nullptr, SourceLocation(), BO_Assign, DstLHS, RHS);
-      if (StoreER.isInvalid())
-        return StmtError();
-      Stmt *ResultWriteStmt = StoreER.get();
-
       const bool GuardResultWrite = SpawningThreadField != nullptr;
       if (GuardResultWrite) {
-  
-        Expr *Cond = nullptr;
-        {
-          IdentifierInfo &ThreadIdxId = Ctx.Idents.get("threadIdx");
-          auto Lookup = Ctx.getTranslationUnitDecl()->lookup(&ThreadIdxId);
-          VarDecl *ThreadIdxVar =
-              Lookup.empty() ? nullptr : dyn_cast<VarDecl>(Lookup.front());
-  
-          if (ThreadIdxVar) {
-            Expr *ThreadIdxRef = DeclRefExpr::Create(
-                Ctx, NestedNameSpecifierLoc(), SourceLocation(), ThreadIdxVar,
-                false, SourceLocation(), ThreadIdxVar->getType(), VK_LValue);
-  
-            CXXScopeSpec SS;
-            IdentifierInfo &XId = Ctx.Idents.get("x");
-            DeclarationNameInfo XNameInfo(&XId, SourceLocation());
-  
-            ExprResult ThreadIdxX =
-                SemaRef.BuildMemberReferenceExpr(ThreadIdxRef, ThreadIdxVar->getType(),
-                                                 SourceLocation(), /*IsArrow*/false, SS,
-                                                 SourceLocation(), nullptr, XNameInfo,
-                                                 nullptr, nullptr);
-  
-            if (!ThreadIdxX.isInvalid()) {
-              ExprResult SpawningThreadER = B.buildFieldAccess(
-                  B.buildSelfRef(), true, SpawningThreadField,
-                  SourceLocation());
-              if (SpawningThreadER.isInvalid())
-                return StmtError();
-              Expr *SpawningThread = SpawningThreadER.get();
-              if (SpawningThread->isGLValue())
-                SpawningThread = ImplicitCastExpr::Create(
-                    Ctx, SpawningThread->getType(), CK_LValueToRValue,
-                    SpawningThread, nullptr, VK_PRValue,
-                    FPOptionsOverride());
-  
-              ExprResult Eq = SemaRef.BuildBinOp(
-                  nullptr, SourceLocation(), BO_EQ, ThreadIdxX.get(),
-                  SpawningThread);
-              if (!Eq.isInvalid()) Cond = Eq.get();
-            }
-          }
-        }
-  
-        if (Cond) {
-          Stmt *ThenS = ResultWriteStmt;
-          IfStmt *If = IfStmt::Create(
-              Ctx, SourceLocation(),
-              IfStatementKind::Ordinary,
-              nullptr, nullptr, Cond,
-              SourceLocation(), SourceLocation(),
-              ThenS,
-              SourceLocation(), nullptr);
-  
-          Sequence.push_back(If);
-        } else {
-          Sequence.push_back(ResultWriteStmt);
-        }
+        Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, SourceLocation());
+        ExprResult SpawningThreadER = B.buildFieldAccess(
+            B.buildSelfRef(), true, SpawningThreadField, SourceLocation());
+        if (!ThreadIdxX || SpawningThreadER.isInvalid())
+          return StmtError();
+        Expr *SpawningThread = toRValue(SpawningThreadER.get());
+        Expr *Zero = IntegerLiteral::Create(
+            Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), 0), Ctx.IntTy,
+            SourceLocation());
+        Expr *TaskId = buildParamRValue(TidParam);
+        ExprResult IsRootER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_EQ, TaskId, Zero);
+        ExprResult IsSpawnerER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_EQ, ThreadIdxX, SpawningThread);
+        if (IsRootER.isInvalid() || IsSpawnerER.isInvalid())
+          return StmtError();
+
+        // Root is a block-uniform case: all lanes publish their own return
+        // value.  An ordinary task retains the original spawning-lane-only
+        // result delivery semantics.
+        Expr *RootIndices[] = {ThreadIdxX};
+        ExprResult RootDstER = SemaRef.ActOnArraySubscriptExpr(
+            nullptr, toRValue(DstER.get()), SourceLocation(),
+            MultiExprArg(RootIndices, 1), SourceLocation());
+        if (RootDstER.isInvalid())
+          return StmtError();
+        ExprResult RootStoreER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign, RootDstER.get(), RHS);
+
+        ExprResult NormalDstFieldER = B.buildFieldAccess(
+            B.buildSelfRef(), true, ResultDstField, SourceLocation());
+        if (RootStoreER.isInvalid() || NormalDstFieldER.isInvalid())
+          return StmtError();
+        Expr *NormalDst = UnaryOperator::Create(
+            Ctx, toRValue(NormalDstFieldER.get()), UO_Deref,
+            ResultField->getType(), VK_LValue, OK_Ordinary, SourceLocation(),
+            false, FPOptionsOverride());
+        ExprResult NormalStoreER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign, NormalDst, RHS);
+        if (NormalStoreER.isInvalid())
+          return StmtError();
+
+        IfStmt *NormalIf = IfStmt::Create(
+            Ctx, SourceLocation(), IfStatementKind::Ordinary, nullptr,
+            nullptr, IsSpawnerER.get(), SourceLocation(), SourceLocation(),
+            NormalStoreER.get(), SourceLocation(), nullptr);
+        IfStmt *RootIf = IfStmt::Create(
+            Ctx, SourceLocation(), IfStatementKind::Ordinary, nullptr,
+            nullptr, IsRootER.get(), SourceLocation(), SourceLocation(),
+            RootStoreER.get(), SourceLocation(), NormalIf);
+        Sequence.push_back(RootIf);
       } else {
-        Sequence.push_back(ResultWriteStmt);
+        Expr *DstLHS = UnaryOperator::Create(
+            Ctx, toRValue(DstER.get()), UO_Deref, ResultField->getType(),
+            VK_LValue, OK_Ordinary, SourceLocation(), false,
+            FPOptionsOverride());
+        ExprResult StoreER = SemaRef.BuildBinOp(
+            nullptr, SourceLocation(), BO_Assign, DstLHS, RHS);
+        if (StoreER.isInvalid())
+          return StmtError();
+        Sequence.push_back(StoreER.get());
       }
     }
 
@@ -1345,20 +1336,19 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   if (!AStmt) return StmtError();
   ASTContext &Ctx = getASTContext();
   
-  // Extract call expression and result variable
+  // Extract the call and optional result destination.  Preserve the complete
+  // lvalue expression: block-mode entry commonly uses array subscripts such
+  // as d_result[threadIdx.x].
   // Expected patterns:
   //   result = fib(n);  (assignment with call)
   //   fib(n);           (direct call)
   CallExpr *EntryCall = nullptr;
-  VarDecl *ResultVar = nullptr;
+  Expr *ResultDest = nullptr;
   SmallVector<Expr *, 4> CallArgs;
   
   if (auto *BinOp = dyn_cast<BinaryOperator>(AStmt)) {
     if (BinOp->getOpcode() == BO_Assign) {
-      // Get result variable from LHS
-      if (auto *DRE = dyn_cast<DeclRefExpr>(BinOp->getLHS()->IgnoreParenImpCasts())) {
-        ResultVar = dyn_cast<VarDecl>(DRE->getDecl());
-      }
+      ResultDest = BinOp->getLHS();
       // Get call expression from RHS
       Expr *RHS = BinOp->getRHS()->IgnoreParenImpCasts();
       EntryCall = dyn_cast<CallExpr>(RHS);
@@ -1419,6 +1409,22 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
   const bool IsBlockWorker =
       isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
+  VarDecl *EntryResultBufferVar = nullptr;
+  if (IsBlockWorker && ResultDest && TaskInfo.ResultDstField) {
+    const uint64_t WorkerSize =
+        getMacroIntegerValue(SemaRef, "GTAP_BLOCK_SIZE", 1);
+    QualType BufferTy = Ctx.getConstantArrayType(
+        TaskInfo.ReturnType, llvm::APInt(64, WorkerSize), nullptr,
+        ArraySizeModifier::Normal, 0);
+    std::string BufferName = "__gtap_entry_result_" + FuncName + "_" +
+                             std::to_string(StartLoc.getRawEncoding());
+    IdentifierInfo &BufferId = Ctx.Idents.get(BufferName);
+    EntryResultBufferVar = VarDecl::Create(
+        Ctx, Ctx.getTranslationUnitDecl(), StartLoc, StartLoc, &BufferId,
+        BufferTy, Ctx.getTrivialTypeSourceInfo(BufferTy), SC_Static);
+    EntryResultBufferVar->addAttr(CUDADeviceAttr::CreateImplicit(Ctx));
+    Ctx.getTranslationUnitDecl()->addDecl(EntryResultBufferVar);
+  }
   std::string TaskPtrName = "__gtap_task_ptr_" + FuncName;
   
   FunctionDecl *GetTaskDataFn = requireRuntimeFunction(SemaRef, "__gtap_get_task_data", StartLoc);
@@ -1512,8 +1518,9 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       ++ArgIndex;
     }
     
-    // The root task has no spawning parent thread. Preserve the existing
-    // block-mode entry convention in which thread 0 supplies its result.
+    // Thread 0 supplies the root arguments for state-0 broadcast.  Root
+    // result delivery is distinguished by task ID zero, not by overloading
+    // this field, because it is also used as a parameter-array index.
     if (TaskInfo.SpawningThreadField) {
       Expr *TaskPtrRef = DeclRefExpr::Create(
           Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
@@ -1535,7 +1542,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       DeviceStmts.push_back(AssignER.get());
     }
 
-    if (TaskInfo.ResultDstField && TaskInfo.ResultField) {
+    if (TaskInfo.ResultDstField && TaskInfo.ResultField &&
+        !EntryResultBufferVar) {
       Expr *TaskPtrRef = DeclRefExpr::Create(
           Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
           false, StartLoc, TaskPtrVar->getType(), VK_LValue);
@@ -1555,6 +1563,32 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       ExprResult AssignER = SemaRef.BuildBinOp(
           nullptr, SourceLocation(), BO_Assign,
           FieldER.get(), OwnResultAddr);
+      if (AssignER.isInvalid())
+        return StmtError();
+      DeviceStmts.push_back(AssignER.get());
+    }
+
+    if (TaskInfo.ResultDstField && EntryResultBufferVar) {
+      Expr *TaskPtrRef = DeclRefExpr::Create(
+          Ctx, NestedNameSpecifierLoc(), SourceLocation(), TaskPtrVar,
+          false, StartLoc, TaskPtrVar->getType(), VK_LValue);
+      Expr *TaskPtrRValue = ImplicitCastExpr::Create(
+          Ctx, TaskPtrVar->getType(), CK_LValueToRValue, TaskPtrRef, nullptr,
+          VK_PRValue, FPOptionsOverride());
+      ExprResult EntryDstER = B.buildFieldAccess(
+          TaskPtrRValue, true, TaskInfo.ResultDstField,
+          SourceLocation());
+      if (EntryDstER.isInvalid())
+        return StmtError();
+      Expr *BufferRef = DeclRefExpr::Create(
+          Ctx, NestedNameSpecifierLoc(), SourceLocation(),
+          EntryResultBufferVar, false, StartLoc,
+          EntryResultBufferVar->getType(), VK_LValue);
+      Expr *BufferPtr = ImplicitCastExpr::Create(
+          Ctx, Ctx.getPointerType(TaskInfo.ReturnType), CK_ArrayToPointerDecay,
+          BufferRef, nullptr, VK_PRValue, FPOptionsOverride());
+      ExprResult AssignER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, EntryDstER.get(), BufferPtr);
       if (AssignER.isInvalid())
         return StmtError();
       DeviceStmts.push_back(AssignER.get());
@@ -1660,17 +1694,34 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     // llvm::errs() << "[GTaP][Sema] Generated __gtap_execute_task_loop_device call (for all threads)\n";
   }
   
-  // Access result from task pointer (THREAD 0 ONLY)
+  // Access the root result after the collective scheduler loop.
   SmallVector<Stmt *, 8> ResultStmts;
   
-  if (ResultVar && TaskInfo.ResultField && GetTaskDataFn) {
-    // Create a new local task pointer declaration
+  if (ResultDest && IsBlockWorker && EntryResultBufferVar) {
+    Expr *ResultAccess = DeclRefExpr::Create(
+        Ctx, NestedNameSpecifierLoc(), SourceLocation(), EntryResultBufferVar,
+        false, StartLoc, EntryResultBufferVar->getType(), VK_LValue);
+    Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, StartLoc);
+    if (!ThreadIdxX)
+      return StmtError();
+    Expr *Indices[] = {ThreadIdxX};
+    ExprResult ElementER = SemaRef.ActOnArraySubscriptExpr(
+        nullptr, ResultAccess, StartLoc, MultiExprArg(Indices, 1), EndLoc);
+    if (ElementER.isInvalid())
+      return StmtError();
+    ResultAccess = ImplicitCastExpr::Create(
+        Ctx, ElementER.get()->getType(), CK_LValueToRValue, ElementER.get(),
+        nullptr, VK_PRValue, FPOptionsOverride());
+    ExprResult AssignER = SemaRef.BuildBinOp(
+        nullptr, SourceLocation(), BO_Assign, ResultDest, ResultAccess);
+    if (AssignER.isInvalid())
+      return StmtError();
+    ResultStmts.push_back(AssignER.get());
+  } else if (ResultDest && !IsBlockWorker && TaskInfo.ResultField &&
+             GetTaskDataFn) {
     auto [ResultTaskPtrVar, ResultTaskPtrDeclStmt] = createTaskPtrDecl();
-    
     if (ResultTaskPtrVar && ResultTaskPtrDeclStmt) {
       ResultStmts.push_back(ResultTaskPtrDeclStmt);
-      
-      // Access: __gtap_task_ptr_fib->__gtap_result
       Expr *TaskPtrRef = DeclRefExpr::Create(
           Ctx, NestedNameSpecifierLoc(), SourceLocation(), ResultTaskPtrVar,
           false, StartLoc, ResultTaskPtrVar->getType(), VK_LValue);
@@ -1678,30 +1729,21 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
           Ctx, ResultTaskPtrVar->getType(), CK_LValueToRValue,
           TaskPtrRef, nullptr, VK_PRValue, FPOptionsOverride());
       
-      // Create arrow member access: __gtap_task_ptr_fib->__gtap_result
-      ExprResult ResultAccessER = B.buildFieldAccess(TaskPtrRValue, true, TaskInfo.ResultField, SourceLocation());
+      ExprResult ResultAccessER = B.buildFieldAccess(
+          TaskPtrRValue, true, TaskInfo.ResultField, SourceLocation());
       if (ResultAccessER.isInvalid()) return StmtError();
       Expr *ResultAccess = ResultAccessER.get();
-      
-      // Convert to rvalue if needed
       if (ResultAccess->isLValue()) {
         ResultAccess = ImplicitCastExpr::Create(
             Ctx, ResultAccess->getType(), CK_LValueToRValue,
             ResultAccess, nullptr, VK_PRValue, FPOptionsOverride());
       }
       
-      // Create assignment: d_result = __gtap_task_ptr_fib->__gtap_result
-      Expr *ResultVarRef = DeclRefExpr::Create(
-          Ctx, NestedNameSpecifierLoc(), SourceLocation(), ResultVar,
-          false, StartLoc, ResultVar->getType(), VK_LValue);
-      
-      ExprResult ResultAssignER = SemaRef.BuildBinOp(nullptr, SourceLocation(), BO_Assign, ResultVarRef, ResultAccess);
+      ExprResult ResultAssignER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, ResultDest, ResultAccess);
       if (ResultAssignER.isInvalid()) return StmtError();
       Expr *ResultAssign = ResultAssignER.get();
-      
       ResultStmts.push_back(ResultAssign);
-      // llvm::errs() << "[GTaP][Sema] Generated direct result access with local pointer: "
-      //              << "d_result = __gtap_task_ptr->__gtap_result\n";
     }
   }
   
@@ -1711,7 +1753,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // 1. bool __gtap_is_master = (blockIdx.x == 0 && threadIdx.x == 0);
   // 2. if (__gtap_is_master) { InitStmts }
   // 3. ExecuteStmt (all threads)
-  // 4. if (__gtap_is_master) { ResultStmts }
+  // 4. Copy the root result on the master (thread mode) or collectively
+  //    (block mode).
   
   SmallVector<Stmt *, 16> FinalStmts;
   
@@ -1840,14 +1883,45 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
         // llvm::errs() << "[GTaP][Sema] Added execute_task_loop_device call (runs on all threads)\n";
       }
       
-      // Create second if statement for result
+      // Thread mode copies its scalar result on the grid master.  In block
+      // mode, all threads of the master block evaluate the assignment and
+      // observe the root return value for their threadIdx.x lane.
       if (!ResultStmts.empty()) {
         Expr *MasterVarRef2 = DeclRefExpr::Create(
             Ctx, NestedNameSpecifierLoc(), SourceLocation(), MasterVar,
             false, StartLoc, Ctx.BoolTy, VK_LValue);
-        Expr *MasterCheck2 = ImplicitCastExpr::Create(
-            Ctx, Ctx.BoolTy, CK_LValueToRValue, MasterVarRef2, nullptr,
-            VK_PRValue, FPOptionsOverride());
+        Expr *MasterCheck2 = nullptr;
+        if (!IsBlockWorker) {
+          MasterCheck2 = ImplicitCastExpr::Create(
+              Ctx, Ctx.BoolTy, CK_LValueToRValue, MasterVarRef2, nullptr,
+              VK_PRValue, FPOptionsOverride());
+        } else {
+          IdentifierInfo &BlockIdxId = Ctx.Idents.get("blockIdx");
+          auto Lookup = Ctx.getTranslationUnitDecl()->lookup(&BlockIdxId);
+          VarDecl *BlockIdxVar =
+              Lookup.empty() ? nullptr : dyn_cast<VarDecl>(Lookup.front());
+          if (!BlockIdxVar)
+            return StmtError();
+          Expr *BlockIdxRef = DeclRefExpr::Create(
+              Ctx, NestedNameSpecifierLoc(), SourceLocation(), BlockIdxVar,
+              false, StartLoc, BlockIdxVar->getType(), VK_LValue);
+          CXXScopeSpec SS;
+          IdentifierInfo &XId = Ctx.Idents.get("x");
+          DeclarationNameInfo XNameInfo(&XId, StartLoc);
+          ExprResult BlockIdxX = SemaRef.BuildMemberReferenceExpr(
+              BlockIdxRef, BlockIdxVar->getType(), StartLoc, false, SS,
+              SourceLocation(), nullptr, XNameInfo, nullptr, nullptr);
+          if (BlockIdxX.isInvalid())
+            return StmtError();
+          Expr *Zero = IntegerLiteral::Create(
+              Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), 0), Ctx.IntTy,
+              StartLoc);
+          ExprResult BlockZero = SemaRef.BuildBinOp(
+              nullptr, StartLoc, BO_EQ, BlockIdxX.get(), Zero);
+          if (BlockZero.isInvalid())
+            return StmtError();
+          MasterCheck2 = BlockZero.get();
+        }
         
         CompoundStmt *ResultBlock = CompoundStmt::Create(
             Ctx, ResultStmts, FPOptionsOverride(), StartLoc, EndLoc);
@@ -1866,13 +1940,13 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
         );
         
         FinalStmts.push_back(ResultIfStmt);
-        // llvm::errs() << "[GTaP][Sema] Created second if (__gtap_is_master) block for result copy\n";
+        // llvm::errs() << "[GTaP][Sema] Created root result-copy block\n";
       }
       
       CompoundStmt *FinalBlock = CompoundStmt::Create(
           Ctx, FinalStmts, FPOptionsOverride(), StartLoc, EndLoc);
       
-      // llvm::errs() << "[GTaP][Sema] Wrapped device code: bool __gtap_is_master, task decl, if(__gtap_is_master) init, execute all threads, if(__gtap_is_master) result\n";
+      // llvm::errs() << "[GTaP][Sema] Wrapped device entry code\n";
       return StmtResult(FinalBlock);
   }
   
