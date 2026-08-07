@@ -1421,9 +1421,15 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     IdentifierInfo &BufferId = Ctx.Idents.get(BufferName);
     EntryResultBufferVar = VarDecl::Create(
         Ctx, Ctx.getTranslationUnitDecl(), StartLoc, StartLoc, &BufferId,
-        BufferTy, Ctx.getTrivialTypeSourceInfo(BufferTy), SC_Static);
+        BufferTy, Ctx.getTrivialTypeSourceInfo(BufferTy), SC_None);
+    EntryResultBufferVar->setInit(
+        new (Ctx) ImplicitValueInitExpr(BufferTy));
     EntryResultBufferVar->addAttr(CUDADeviceAttr::CreateImplicit(Ctx));
     Ctx.getTranslationUnitDecl()->addDecl(EntryResultBufferVar);
+    Decl *BufferDecl = EntryResultBufferVar;
+    DeclGroupRef BufferDeclGroup =
+        DeclGroupRef::Create(Ctx, &BufferDecl, 1);
+    SemaRef.getASTConsumer().HandleTopLevelDecl(BufferDeclGroup);
   }
   std::string TaskPtrName = "__gtap_task_ptr_" + FuncName;
   
