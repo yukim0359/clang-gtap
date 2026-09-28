@@ -1,7 +1,7 @@
 // RUN: %clang_cc1 -triple nvptx64-nvidia-cuda -fcuda-is-device -x cuda \
 // RUN:   -std=c++17 -ast-dump %s | FileCheck %s
 // CHECK: RecordDecl {{.*}} struct fib_block_task_data definition
-// CHECK: FieldDecl {{.*}} n 'int[32]'
+// CHECK: FieldDecl {{.*}} n 'int'
 // CHECK: FieldDecl {{.*}} __cap_x 'int[32]'
 // CHECK: FieldDecl {{.*}} __cap_y 'int[32]'
 // CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'

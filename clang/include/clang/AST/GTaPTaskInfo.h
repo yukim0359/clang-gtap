@@ -31,6 +31,7 @@ struct GTaPTaskFunctionInfo {
   FunctionDecl *Func = nullptr;
   std::vector<GTaPDirectiveInfo> Directives;
   std::vector<ParmVarDecl *> Parameters;
+  std::vector<bool> ParameterIsUniform;
   std::vector<VarDecl *> CapturedVariables;
   QualType ReturnType;
   RecordDecl *TaskRecord = nullptr;
@@ -149,36 +150,37 @@ public:
   }
 
   GTaPTaskFunctionInfo analyze(Stmt *BodyOverride = nullptr) {
-    Result.Func = TargetFunc;
-    Result.ReturnType = TargetFunc->getReturnType();
-    for (auto *Param : TargetFunc->parameters())
-      Result.Parameters.push_back(Param);
-  
-    if (BodyOverride) {
-      TraverseStmt(BodyOverride);
-    } else if (TargetFunc->hasBody()) {
-      TraverseStmt(TargetFunc->getBody());
-    } else if (FunctionDecl *Def = TargetFunc->getDefinition()) {
-      if (Def->hasBody()) TraverseStmt(Def->getBody());
+    FunctionDecl *AnalyzedFunc = TargetFunc;
+    Stmt *Body = BodyOverride;
+    if (!Body) {
+      if (TargetFunc->hasBody()) {
+        Body = TargetFunc->getBody();
+      } else if (FunctionDecl *Def = TargetFunc->getDefinition()) {
+        if (Def->hasBody()) {
+          AnalyzedFunc = Def;
+          Body = Def->getBody();
+        }
+      }
     }
-  
-    determineCapturedVariables(BodyOverride);
+
+    Result.Func = AnalyzedFunc;
+    Result.ReturnType = AnalyzedFunc->getReturnType();
+    for (auto *Param : AnalyzedFunc->parameters())
+      Result.Parameters.push_back(Param);
+
+    if (Body)
+      TraverseStmt(Body);
+
+    determineCapturedVariables(Body);
     return Result;
   }
 
 private:
-  void determineCapturedVariables(Stmt *BodyOverride) {
+  void determineCapturedVariables(Stmt *Body) {
     Result.CapturedVariables.clear();
 
     if (!TargetFunc) return;
-  
-    // 1) Specify the target body to analyze
-    Stmt *Body = BodyOverride;
-    if (!Body) {
-      if (TargetFunc->hasBody()) Body = TargetFunc->getBody();
-      else if (FunctionDecl *Def = TargetFunc->getDefinition())
-        if (Def->hasBody()) Body = Def->getBody();
-    }
+
     if (!Body) {
       // llvm::errs() << "[GTaP] No body available for " << TargetFunc->getName() << "\n";
       return;
@@ -207,7 +209,7 @@ private:
   
     // 3) Build CFG with Body (override)
     CFG::BuildOptions BO;
-    std::unique_ptr<CFG> Cfg = CFG::buildCFG(TargetFunc, Body, &Ctx, BO);
+    std::unique_ptr<CFG> Cfg = CFG::buildCFG(Result.Func, Body, &Ctx, BO);
     if (!Cfg) {
       // llvm::errs() << "[GTaP] CFG construction failed for function: "
       //              << TargetFunc->getName() << "\n";

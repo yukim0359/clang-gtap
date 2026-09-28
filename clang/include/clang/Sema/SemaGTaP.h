@@ -148,16 +148,7 @@ public:
   StmtResult TransformTaskFunctionBody(FunctionDecl *FD, CompoundStmt *Body);
 
   /// Get cached task info for a function (for use in TransformGTaPTaskDirective)
-  GTaPTaskFunctionInfo &getCachedTaskInfo(FunctionDecl *FD) {
-    FD = FD->getCanonicalDecl();
-    // Create if it doesn't exist
-    if (CachedTaskInfos.find(FD) == CachedTaskInfos.end()) {
-      ASTContext &Ctx = getASTContext();
-      GTaPTaskFunctionAnalyzer Analyzer(Ctx, FD);
-      CachedTaskInfos[FD] = Analyzer.analyze();
-    }
-    return CachedTaskInfos[FD];
-  }
+  GTaPTaskFunctionInfo &getCachedTaskInfo(FunctionDecl *FD);
 
   /// Get or create the entry function for a user-authored GTaP task function
   FunctionDecl *getOrCreateStateMachineFunction(FunctionDecl *UserFD,

@@ -9,6 +9,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/StmtGTaP.h"
+#include "clang/Analysis/Analyses/ExprMutationAnalyzer.h"
 #include "clang/Basic/AttrKinds.h"
 #include "clang/Basic/GTaPKinds.h"
 #include "clang/Lex/Preprocessor.h"
@@ -235,6 +236,22 @@ static bool checkNoTaskwaitInSwitchOrDiag(Sema &S, Stmt *Body) {
   return C.Valid;
 }
 
+static void classifyUniformParameters(ASTContext &Ctx,
+                                      GTaPTaskFunctionInfo &TaskInfo,
+                                      Stmt *Body) {
+  TaskInfo.ParameterIsUniform.assign(TaskInfo.Parameters.size(), false);
+  if (!Body)
+    return;
+
+  ExprMutationAnalyzer MutationAnalyzer(*Body, Ctx);
+  for (size_t I = 0; I < TaskInfo.Parameters.size(); ++I) {
+    ParmVarDecl *Param = TaskInfo.Parameters[I];
+    if (!Param)
+      continue;
+    TaskInfo.ParameterIsUniform[I] = !MutationAnalyzer.isMutated(Param);
+  }
+}
+
 static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         GTaPTaskFunctionInfo &TaskInfo,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
@@ -288,11 +305,11 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     for (ParmVarDecl *Param : TaskInfo.Parameters) {
       if (!Param)
         continue;
+      const unsigned CurrentParamIndex = ParamIndex++;
       std::string FieldName =
           Param->getIdentifier()
               ? Param->getName().str()
-              : ("__param_" + std::to_string(ParamIndex));
-      ++ParamIndex;
+              : ("__param_" + std::to_string(CurrentParamIndex));
       FieldName = makeUniqueFieldName(FieldName);
       if (!checkTaskDataFieldTypeOrDiag(S, Param->getLocation(), FieldName,
                                         Param->getType())) {
@@ -301,14 +318,15 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       }
       QualType FieldTy = Param->getType();
       const bool IsUniformBlockParameter =
-          IsBlockWorker && FieldTy.isConstQualified();
-      // A top-level const parameter cannot change during the task's lifetime,
-      // so all CUDA threads in a block task may read the single value supplied
-      // by the spawning thread.  Strip only the top-level qualifier from the
-      // storage type so spawn/entry initialization remains assignable; nested
-      // qualifiers such as the pointee const in `const T *const` are retained.
-      if (IsUniformBlockParameter)
-        FieldTy = FieldTy.getUnqualifiedType();
+          IsBlockWorker &&
+          CurrentParamIndex < TaskInfo.ParameterIsUniform.size() &&
+          TaskInfo.ParameterIsUniform[CurrentParamIndex];
+      // Task-data fields are initialized after allocation, so their storage
+      // type must be assignable.  Remove only a parameter's top-level const;
+      // nested qualifiers such as the pointee const in `const T *` remain.
+      SplitQualType FieldSplit = FieldTy.split();
+      FieldSplit.Quals.removeConst();
+      FieldTy = Ctx.getQualifiedType(FieldSplit);
       // A block task is resumed collectively, so an ordinary CUDA function
       // parameter must retain one value per thread.  The argument expression
       // is evaluated once by the spawning thread; state 0 of the child then
@@ -1113,6 +1131,22 @@ private:
 } // namespace
 
 SemaGTaP::SemaGTaP(Sema &S) : SemaBase(S) {}
+
+GTaPTaskFunctionInfo &SemaGTaP::getCachedTaskInfo(FunctionDecl *FD) {
+  FD = FD->getCanonicalDecl();
+  auto It = CachedTaskInfos.find(FD);
+  if (It != CachedTaskInfos.end())
+    return It->second;
+
+  ASTContext &Ctx = getASTContext();
+  GTaPTaskFunctionAnalyzer Analyzer(Ctx, FD);
+  GTaPTaskFunctionInfo TaskInfo = Analyzer.analyze();
+  Stmt *Body = TaskInfo.Func && TaskInfo.Func->hasBody()
+                   ? TaskInfo.Func->getBody()
+                   : nullptr;
+  classifyUniformParameters(Ctx, TaskInfo, Body);
+  return CachedTaskInfos.try_emplace(FD, std::move(TaskInfo)).first->second;
+}
 
 ASTContext &SemaGTaP::getASTContext() { return SemaRef.getASTContext(); }
 
@@ -2015,6 +2049,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   GTaPTaskFunctionAnalyzer Analyzer(Ctx, FD);
   GTaPTaskFunctionInfo TaskInfo = Analyzer.analyze(Body);
+  classifyUniformParameters(Ctx, TaskInfo, Body);
   FunctionDecl *CacheKey = FD->getCanonicalDecl();
   CachedTaskInfos[CacheKey] = TaskInfo;
 
@@ -2273,8 +2308,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     for (FieldDecl *Field : TI.ParameterFields) {
       if (!Field)
         continue;
-      // Top-level const parameters use one uniform field for the whole block
-      // and therefore require no state-0 lane broadcast.
+      // Parameters that are not mutated or escaped use one uniform field for
+      // the whole block and therefore require no state-0 lane broadcast.
       if (!Ctx.getAsConstantArrayType(Field->getType()))
         continue;
 
