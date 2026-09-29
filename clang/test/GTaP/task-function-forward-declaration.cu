@@ -9,7 +9,6 @@
 // CHECK: CompoundStmt
 
 #define __device__ __attribute__((device))
-#define GTAP_BLOCK_SIZE 32
 #define __GTAP_WORKER_IS_BLOCK 1
 
 struct TaskContext {};

@@ -6,17 +6,19 @@
 // CHECK: FieldDecl {{.*}} input 'const Block *'
 // CHECK: FieldDecl {{.*}} output 'Block *'
 // CHECK: FieldDecl {{.*}} read_only 'int'
+// CHECK: FieldDecl {{.*}} top_const_pointer 'const Block *'
+// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result_dst 'int *'
+// CHECK: RecordDecl {{.*}} struct inferred_parameters_task_lane_storage definition
 // CHECK: FieldDecl {{.*}} assigned 'int[32]'
 // CHECK: FieldDecl {{.*}} incremented 'int[32]'
 // CHECK: FieldDecl {{.*}} compound 'int[32]'
 // CHECK: FieldDecl {{.*}} aggregate 'Block[32]'
 // CHECK: FieldDecl {{.*}} by_ref 'int[32]'
 // CHECK: FieldDecl {{.*}} address_taken 'int[32]'
-// CHECK: FieldDecl {{.*}} top_const_pointer 'const Block *'
-// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
 
 #define __device__ __attribute__((device))
-#define GTAP_BLOCK_SIZE 32
 #define __GTAP_WORKER_IS_BLOCK 1
 
 struct TaskContext {};

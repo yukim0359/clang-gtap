@@ -13,6 +13,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 namespace clang {
 class ASTContext;
@@ -157,8 +159,15 @@ public:
                                                 QualType IntTy,
                                                 QualType TaskCtxPtrTy);
 
-  /// Record the largest generated task-data record size in this translation unit.
+  /// Record a generated task-data layout in this translation unit.
   void noteTaskRecordSize(uint64_t Bytes);
+  void noteBlockTaskRecordLayout(uint64_t FixedBytes,
+                                 uint64_t LaneStorageBytes);
+  void noteEntryResultSize(uint64_t Bytes);
+
+  /// Notify the AST consumer about compiler-generated metadata definitions
+  /// after every task-data layout in the translation unit is known.
+  void ActOnEndOfTranslationUnit();
 
 private:
   // Get the AST context.
@@ -174,8 +183,12 @@ private:
   /// Cache of analysed task functions, keyed by the original declaration.
   llvm::DenseMap<const FunctionDecl *, GTaPTaskFunctionInfo> CachedTaskInfos;
 
-  uint64_t AutoTaskDataSize = 1;
+  uint64_t AutoTaskDataSize = 0;
   VarDecl *AutoTaskDataSizeDecl = nullptr;
+  std::vector<std::pair<uint64_t, uint64_t>> AutoBlockTaskDataLayouts;
+  VarDecl *AutoBlockTaskDataSizesDecl = nullptr;
+  uint64_t AutoEntryResultSize = 1;
+  VarDecl *AutoEntryResultSizeDecl = nullptr;
 };
 
 }

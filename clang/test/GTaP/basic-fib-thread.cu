@@ -6,6 +6,7 @@
 // CHECK: FieldDecl {{.*}} __cap_y 'int'
 // CHECK: FieldDecl {{.*}} __gtap_result 'int'
 // CHECK: FieldDecl {{.*}} __gtap_result_dst 'int *'
+// CHECK: VarDecl {{.*}} __gtap_auto_task_data_size 'const unsigned long' extern cinit
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_fib
 // CHECK-COUNT-2: DeclRefExpr {{.*}} Function {{.*}} '__gtap_spawn_task'
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join'

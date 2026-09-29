@@ -1,18 +1,21 @@
 // RUN: %clang_cc1 -triple nvptx64-nvidia-cuda -fcuda-is-device -x cuda \
 // RUN:   -std=c++17 -ast-dump %s | FileCheck %s
 // CHECK: RecordDecl {{.*}} struct captured_arrays_task_data definition
+// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result_dst 'int *'
+// CHECK: RecordDecl {{.*}} struct captured_arrays_task_lane_storage definition
 // CHECK: FieldDecl {{.*}} input 'const Block *[32]'
 // CHECK: FieldDecl {{.*}} mutable_value 'int[32]'
 // CHECK: FieldDecl {{.*}} __cap_pending_a 'const Block *[32][32]'
 // CHECK: FieldDecl {{.*}} __cap_pending_y 'int[32][32]'
 // CHECK: FieldDecl {{.*}} __cap_pending_blocks 'Block[32][4]'
 // CHECK: FieldDecl {{.*}} __cap_constants 'const int[32][2]'
-// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
+// CHECK: FieldDecl {{.*}} __cap_child 'int[32]'
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_captured_arrays
 // CHECK: CompoundStmt
 
 #define __device__ __attribute__((device))
-#define GTAP_BLOCK_SIZE 32
 #define __GTAP_WORKER_IS_BLOCK 1
 
 struct TaskContext {};

@@ -26,7 +26,11 @@ using namespace clang;
 
 namespace {
 
+static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc);
+
 struct GTaPExprBuilder {
+  static constexpr uint64_t LaneStorageWidth = 32;
+
   Sema &SemaRef;
   ASTContext &Ctx;
   ValueDecl *SelfParam;
@@ -48,6 +52,78 @@ struct GTaPExprBuilder {
     return SemaRef.BuildMemberReferenceExpr(
         Base, Base->getType(), Loc, IsArrow, SS,
         SourceLocation(), nullptr, NameInfo, nullptr, nullptr);
+  }
+
+  ExprResult buildTaskFieldAccess(Expr *Base, bool IsArrow, FieldDecl *F,
+                                  const GTaPTaskFunctionInfo &TaskInfo,
+                                  Expr *ThreadIndex = nullptr,
+                                  SourceLocation Loc = SourceLocation()) {
+    if (!TaskInfo.TaskLaneStorageRecord ||
+        F->getParent() != TaskInfo.TaskLaneStorageRecord)
+      return buildFieldAccess(Base, IsArrow, F, Loc);
+
+    if (!ThreadIndex)
+      ThreadIndex = buildThreadIdxXExpr(SemaRef, Loc);
+    if (!ThreadIndex)
+      return ExprError();
+
+    if (Base->isGLValue()) {
+      Base = ImplicitCastExpr::Create(
+          Ctx, Base->getType(), CK_LValueToRValue, Base, nullptr,
+          VK_PRValue, FPOptionsOverride());
+    }
+
+    QualType CharPtrTy = Ctx.getPointerType(Ctx.CharTy);
+    Expr *ByteBase = CStyleCastExpr::Create(
+        Ctx, CharPtrTy, VK_PRValue, CK_BitCast, Base, nullptr,
+        FPOptionsOverride(), Ctx.getTrivialTypeSourceInfo(CharPtrTy), Loc,
+        Loc);
+    QualType SizeTy = Ctx.getSizeType();
+    Expr *LaneStorageOffset = IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy),
+                         TaskInfo.TaskLaneStorageOffset),
+        SizeTy, Loc);
+    ExprResult LaneStorageBaseBytes = SemaRef.BuildBinOp(
+        nullptr, Loc, BO_Add, ByteBase, LaneStorageOffset);
+    if (LaneStorageBaseBytes.isInvalid())
+      return ExprError();
+
+    QualType LaneStorageTy = Ctx.getTypeDeclType(
+        cast<TypeDecl>(TaskInfo.TaskLaneStorageRecord));
+    QualType LaneStoragePtrTy = Ctx.getPointerType(LaneStorageTy);
+    Expr *LaneStorageBase = CStyleCastExpr::Create(
+        Ctx, LaneStoragePtrTy, VK_PRValue, CK_BitCast,
+        LaneStorageBaseBytes.get(),
+        nullptr, FPOptionsOverride(),
+        Ctx.getTrivialTypeSourceInfo(LaneStoragePtrTy), Loc, Loc);
+
+    Expr *WidthForWarp = IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), LaneStorageWidth),
+        Ctx.IntTy, Loc);
+    ExprResult WarpIndex = SemaRef.BuildBinOp(
+        nullptr, Loc, BO_Div, ThreadIndex, WidthForWarp);
+    if (WarpIndex.isInvalid())
+      return ExprError();
+    Expr *WarpIndices[] = {WarpIndex.get()};
+    ExprResult LaneStorage = SemaRef.ActOnArraySubscriptExpr(
+        nullptr, LaneStorageBase, Loc, MultiExprArg(WarpIndices, 1), Loc);
+    if (LaneStorage.isInvalid())
+      return ExprError();
+
+    ExprResult LaneField = buildFieldAccess(LaneStorage.get(), false, F, Loc);
+    if (LaneField.isInvalid())
+      return ExprError();
+
+    Expr *WidthForLane = IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), LaneStorageWidth),
+        Ctx.IntTy, Loc);
+    ExprResult LaneIndex = SemaRef.BuildBinOp(
+        nullptr, Loc, BO_Rem, ThreadIndex, WidthForLane);
+    if (LaneIndex.isInvalid())
+      return ExprError();
+    Expr *LaneIndices[] = {LaneIndex.get()};
+    return SemaRef.ActOnArraySubscriptExpr(
+        nullptr, LaneField.get(), Loc, MultiExprArg(LaneIndices, 1), Loc);
   }
 };
 
@@ -89,28 +165,6 @@ static QualType lookupNamedType(Sema &S, StringRef Name) {
       return S.Context.getTypeDeclType(TD);
   }
   return QualType();
-}
-
-static uint64_t getMacroIntegerValue(Sema &S, StringRef Name, uint64_t Default) {
-  Preprocessor &PP = S.getPreprocessor();
-  IdentifierInfo *II = PP.getIdentifierInfo(Name);
-  if (!II)
-    return Default;
-  MacroInfo *MI = PP.getMacroInfo(II);
-  if (!MI || MI->getNumTokens() != 1)
-    return Default;
-
-  const Token &Tok = MI->tokens().front();
-  if (!Tok.is(tok::numeric_constant))
-    return Default;
-
-  SmallString<32> Spelling;
-  bool Invalid = false;
-  StringRef Text = PP.getSpelling(Tok, Spelling, &Invalid);
-  uint64_t Value = Default;
-  if (!Invalid && !Text.getAsInteger(0, Value))
-    return Value;
-  return Default;
 }
 
 static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
@@ -258,7 +312,6 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
   ASTContext &Ctx = S.getASTContext();
   FieldMap.clear();
   const bool IsBlockWorker = isMacroDefined(S, "__GTAP_WORKER_IS_BLOCK");
-  const uint64_t WorkerSize = getMacroIntegerValue(S, "GTAP_BLOCK_SIZE", 1);
 
   if (TaskInfo.TaskRecordInvalid)
     return nullptr;
@@ -280,6 +333,19 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         FD->getBeginLoc(), FD->getLocation(),
                                         &RecordId);
     RD->startDefinition();
+
+    RecordDecl *LaneStorageRD = nullptr;
+    if (IsBlockWorker) {
+      std::string LaneStorageRecordName =
+          FD->getName().str() + "_task_lane_storage";
+      IdentifierInfo &LaneStorageRecordId =
+          Ctx.Idents.get(LaneStorageRecordName);
+      LaneStorageRD = RecordDecl::Create(
+          Ctx, TagDecl::TagKind::Struct, Ctx.getTranslationUnitDecl(),
+          FD->getBeginLoc(), FD->getLocation(), &LaneStorageRecordId);
+      LaneStorageRD->startDefinition();
+      TaskInfo.TaskLaneStorageRecord = LaneStorageRD;
+    }
 
     std::unordered_map<std::string, unsigned> UsedFieldNames;
     auto makeUniqueFieldName = [&](std::string Base) -> std::string {
@@ -331,12 +397,15 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       // parameter must retain one value per thread.  The argument expression
       // is evaluated once by the spawning thread; state 0 of the child then
       // expands that value into the other elements of this array.
+      RecordDecl *StorageRD = RD;
       if (IsBlockWorker && !IsUniformBlockParameter) {
         FieldTy = Ctx.getConstantArrayType(
-            FieldTy, llvm::APInt(64, WorkerSize), nullptr,
+            FieldTy, llvm::APInt(64, GTaPExprBuilder::LaneStorageWidth),
+            nullptr,
             ArraySizeModifier::Normal, 0);
+        StorageRD = LaneStorageRD;
       }
-      FieldDecl *Field = addField(RD, FieldName, FieldTy);
+      FieldDecl *Field = addField(StorageRD, FieldName, FieldTy);
       TaskInfo.ParameterFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(Param->getCanonicalDecl())] = Field;
     }
@@ -360,10 +429,12 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       }
       if (IsBlockWorker) {
         FieldTy = Ctx.getConstantArrayType(
-            FieldTy, llvm::APInt(64, WorkerSize), nullptr,
+            FieldTy, llvm::APInt(64, GTaPExprBuilder::LaneStorageWidth),
+            nullptr,
             ArraySizeModifier::Normal, 0);
       }
-      FieldDecl *Field = addField(RD, FieldName, FieldTy);
+      FieldDecl *Field = addField(
+          IsBlockWorker ? LaneStorageRD : RD, FieldName, FieldTy);
       TaskInfo.CapturedFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(VD->getCanonicalDecl())] = Field;
     }
@@ -394,10 +465,36 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     }
 
     RD->completeDefinition();
+    if (LaneStorageRD)
+      LaneStorageRD->completeDefinition();
     Ctx.getTranslationUnitDecl()->addDecl(RD);
+    if (LaneStorageRD)
+      Ctx.getTranslationUnitDecl()->addDecl(LaneStorageRD);
     TaskInfo.TaskRecord = RD;
     QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(RD));
-    checkTaskRecordSizeOrDiag(S, FD->getLocation(), TaskRecordTy);
+    if (!IsBlockWorker) {
+      checkTaskRecordSizeOrDiag(S, FD->getLocation(), TaskRecordTy);
+    } else {
+      uint64_t FixedBytes = Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity();
+      uint64_t LaneStorageBytes = 0;
+      uint64_t LaneStorageOffset = FixedBytes;
+      if (LaneStorageRD && !LaneStorageRD->field_empty()) {
+        QualType LaneStorageTy =
+            Ctx.getTypeDeclType(cast<TypeDecl>(LaneStorageRD));
+        uint64_t LaneStorageAlign =
+            Ctx.getTypeAlignInChars(LaneStorageTy).getQuantity();
+        LaneStorageOffset =
+            (FixedBytes + LaneStorageAlign - 1) / LaneStorageAlign *
+            LaneStorageAlign;
+        LaneStorageBytes =
+            Ctx.getTypeSizeInChars(LaneStorageTy).getQuantity();
+      }
+      TaskInfo.TaskLaneStorageOffset = LaneStorageOffset;
+      TaskInfo.TaskLaneStorageSize = LaneStorageBytes;
+      S.GTaP().noteBlockTaskRecordLayout(LaneStorageOffset,
+                                         LaneStorageBytes);
+      S.GTaP().noteEntryResultSize(1);
+    }
 
     return RD;
   }
@@ -411,8 +508,6 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
   };
   populateParams(TaskInfo.Parameters, TaskInfo.ParameterFields);
   populateParams(TaskInfo.CapturedVariables, TaskInfo.CapturedFields);
-  if (TaskInfo.TaskRecord && !TaskInfo.TaskRecord->isCompleteDefinition())
-    TaskInfo.TaskRecord->completeDefinition();
 
   return TaskInfo.TaskRecord;
 }
@@ -424,6 +519,7 @@ class GTaPTaskBodyTransformer
   ASTContext &Ctx;
   VarDecl *SelfDecl;
   llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
+  GTaPTaskFunctionInfo TaskInfo;
   FieldDecl *ResultField;
   FieldDecl *ResultDstField;
   FieldDecl *SpawningThreadField;
@@ -438,6 +534,7 @@ class GTaPTaskBodyTransformer
 public:
   GTaPTaskBodyTransformer(Sema &S, GTaPExprBuilder &B, VarDecl *SelfDecl,
                          llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap,
+                         const GTaPTaskFunctionInfo &TaskInfo,
                          FieldDecl *ResultField,
                          FieldDecl *ResultDstField,
                          FieldDecl *SpawningThreadField,
@@ -445,7 +542,8 @@ public:
                          FunctionDecl *FinishDecl, VarDecl *ChildCountVar,
                          bool IsBlockWorker)
       : Base(S), B(B), Ctx(S.getASTContext()), SelfDecl(SelfDecl),
-        FieldMap(std::move(FieldMap)), ResultField(ResultField),
+        FieldMap(std::move(FieldMap)), TaskInfo(TaskInfo),
+        ResultField(ResultField),
         ResultDstField(ResultDstField),
         SpawningThreadField(SpawningThreadField),
         TidParam(TidParam), CtxParam(CtxParam),
@@ -987,39 +1085,27 @@ public:
             auto FieldIt = CalleeFieldMap.find(Key);
             if (FieldIt != CalleeFieldMap.end()) {
               FieldDecl *Field = FieldIt->second;
-              // Use arrow access (IsArrow=true) since TaskPtrVar is a pointer
-              ExprResult FieldRefER = B.buildFieldAccess(buildTaskPtrRef(), /*IsArrow=*/true, Field, SourceLocation());
-              if (FieldRefER.isInvalid()) return StmtError();
-              Expr *FieldRef = FieldRefER.get();
               const bool IsPerThreadBlockField =
-                  IsBlockWorker && Ctx.getAsConstantArrayType(Field->getType());
-              if (!IsPerThreadBlockField) {
-                ExprResult AssignER = SemaRef.BuildBinOp(
-                    nullptr, SourceLocation(), BO_Assign, FieldRef,
-                    TransformedArg.get());
-                if (AssignER.isInvalid()) return StmtError();
-                TaskStmts.push_back(AssignER.get());
-              } else {
+                  IsBlockWorker && CalleeTaskInfo.TaskLaneStorageRecord &&
+                  Field->getParent() == CalleeTaskInfo.TaskLaneStorageRecord;
+              Expr *ThreadIndex = nullptr;
+              if (IsPerThreadBlockField) {
                 // Store only the spawning thread's parameter value.  State 0
                 // of the child expands this value into the other per-thread
                 // slots collectively.
-                Expr *ThreadIdxX = buildThreadIdxXExpr(
-                    SemaRef, SourceLocation());
-                if (!ThreadIdxX)
+                ThreadIndex = buildThreadIdxXExpr(SemaRef, SourceLocation());
+                if (!ThreadIndex)
                   return StmtError();
-                Expr *Indices[] = {ThreadIdxX};
-                ExprResult Element = SemaRef.ActOnArraySubscriptExpr(
-                    nullptr, FieldRef, SourceLocation(),
-                    MultiExprArg(Indices, 1), SourceLocation());
-                if (Element.isInvalid())
-                  return StmtError();
-                ExprResult Assign = SemaRef.BuildBinOp(
-                    nullptr, SourceLocation(), BO_Assign, Element.get(),
-                    TransformedArg.get());
-                if (Assign.isInvalid())
-                  return StmtError();
-                TaskStmts.push_back(Assign.get());
               }
+              ExprResult FieldRefER = B.buildTaskFieldAccess(
+                  buildTaskPtrRef(), /*IsArrow=*/true, Field,
+                  CalleeTaskInfo, ThreadIndex, SourceLocation());
+              if (FieldRefER.isInvalid()) return StmtError();
+              ExprResult AssignER = SemaRef.BuildBinOp(
+                  nullptr, SourceLocation(), BO_Assign, FieldRefER.get(),
+                  TransformedArg.get());
+              if (AssignER.isInvalid()) return StmtError();
+              TaskStmts.push_back(AssignER.get());
             }
           }
         }
@@ -1107,24 +1193,8 @@ private:
 
   ExprResult buildCapturedFieldAccess(FieldDecl *Field,
                                       SourceLocation Loc = SourceLocation()) {
-    ExprResult MemberER = B.buildFieldAccess(B.buildSelfRef(), true, Field, Loc);
-    if (MemberER.isInvalid())
-      return ExprError();
-
-    Expr *Member = MemberER.get();
-    // Block-mode captures have an extra outer [GTAP_BLOCK_SIZE] dimension;
-    // select the current thread's object.  A source-level array in thread mode
-    // is the captured object itself and must remain an array lvalue.
-    if (!IsBlockWorker || !Ctx.getAsConstantArrayType(Field->getType()))
-      return Member;
-
-    Expr *ThreadIdxX = buildThreadIdxXExpr(SemaRef, Loc);
-    if (!ThreadIdxX)
-      return ExprError();
-
-    Expr *Args[] = {ThreadIdxX};
-    return SemaRef.ActOnArraySubscriptExpr(
-        nullptr, Member, Loc, MultiExprArg(Args, 1), Loc);
+    return B.buildTaskFieldAccess(B.buildSelfRef(), true, Field, TaskInfo,
+                                  nullptr, Loc);
   }
 
 };
@@ -1163,8 +1233,8 @@ void SemaGTaP::noteTaskRecordSize(uint64_t Bytes) {
   QualType SizeTy = Ctx.getSizeType();
   QualType ConstSizeTy = Ctx.getConstType(SizeTy);
   Expr *Init = IntegerLiteral::Create(
-      Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), AutoTaskDataSize),
-      SizeTy, SourceLocation());
+      Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), AutoTaskDataSize), SizeTy,
+      SourceLocation());
 
   if (!AutoTaskDataSizeDecl) {
     if (SemaRef.TUScope) {
@@ -1181,14 +1251,123 @@ void SemaGTaP::noteTaskRecordSize(uint64_t Bytes) {
 
     if (!AutoTaskDataSizeDecl) {
       AutoTaskDataSizeDecl = VarDecl::Create(
-          Ctx, Ctx.getTranslationUnitDecl(), SourceLocation(), SourceLocation(),
-          &II, ConstSizeTy, Ctx.getTrivialTypeSourceInfo(ConstSizeTy),
-          SC_Extern);
+          Ctx, Ctx.getTranslationUnitDecl(), SourceLocation(),
+          SourceLocation(), &II, ConstSizeTy,
+          Ctx.getTrivialTypeSourceInfo(ConstSizeTy), SC_Extern);
       Ctx.getTranslationUnitDecl()->addDecl(AutoTaskDataSizeDecl);
     }
   }
 
   AutoTaskDataSizeDecl->setInit(Init);
+}
+
+void SemaGTaP::noteBlockTaskRecordLayout(uint64_t FixedBytes,
+                                         uint64_t LaneStorageBytes) {
+  FixedBytes = std::max<uint64_t>(FixedBytes, 1);
+  std::pair<uint64_t, uint64_t> Layout{FixedBytes, LaneStorageBytes};
+  if (std::find(AutoBlockTaskDataLayouts.begin(),
+                AutoBlockTaskDataLayouts.end(), Layout) ==
+      AutoBlockTaskDataLayouts.end())
+    AutoBlockTaskDataLayouts.push_back(Layout);
+
+  ASTContext &Ctx = getASTContext();
+  IdentifierInfo &II =
+      Ctx.Idents.get("__gtap_auto_block_task_data_sizes");
+  QualType SizeTy = Ctx.getSizeType();
+  constexpr uint64_t MaxWarps = 32;
+  QualType ArrayTy = Ctx.getConstantArrayType(
+      Ctx.getConstType(SizeTy), llvm::APInt(64, MaxWarps + 1), nullptr,
+      ArraySizeModifier::Normal, 0);
+
+  if (!AutoBlockTaskDataSizesDecl) {
+    if (SemaRef.TUScope) {
+      LookupResult LR(SemaRef, &II, SourceLocation(), Sema::LookupOrdinaryName);
+      if (SemaRef.LookupName(LR, SemaRef.TUScope)) {
+        for (NamedDecl *ND : LR) {
+          if (auto *VD = dyn_cast<VarDecl>(ND)) {
+            AutoBlockTaskDataSizesDecl = VD;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!AutoBlockTaskDataSizesDecl) {
+      AutoBlockTaskDataSizesDecl = VarDecl::Create(
+          Ctx, Ctx.getTranslationUnitDecl(), SourceLocation(),
+          SourceLocation(), &II, ArrayTy,
+          Ctx.getTrivialTypeSourceInfo(ArrayTy),
+          SC_Extern);
+      Ctx.getTranslationUnitDecl()->addDecl(AutoBlockTaskDataSizesDecl);
+    }
+  }
+
+  SmallVector<Expr *, MaxWarps + 1> Sizes;
+  for (uint64_t Warps = 0; Warps <= MaxWarps; ++Warps) {
+    uint64_t MaxBytes = 1;
+    for (const auto &[Fixed, LaneStorage] : AutoBlockTaskDataLayouts)
+      MaxBytes = std::max(MaxBytes, Fixed + Warps * LaneStorage);
+    Sizes.push_back(IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), MaxBytes), SizeTy,
+        SourceLocation()));
+  }
+  InitListExpr *Init = new (Ctx) InitListExpr(
+      Ctx, SourceLocation(), Sizes, SourceLocation());
+  Init->setType(ArrayTy);
+  AutoBlockTaskDataSizesDecl->setInit(Init);
+}
+
+void SemaGTaP::noteEntryResultSize(uint64_t Bytes) {
+  Bytes = std::max<uint64_t>(Bytes, 1);
+  if (Bytes <= AutoEntryResultSize && AutoEntryResultSizeDecl)
+    return;
+  AutoEntryResultSize = std::max(AutoEntryResultSize, Bytes);
+
+  ASTContext &Ctx = getASTContext();
+  IdentifierInfo &II = Ctx.Idents.get("__gtap_auto_entry_result_size");
+  QualType SizeTy = Ctx.getSizeType();
+  QualType ConstSizeTy = Ctx.getConstType(SizeTy);
+  Expr *Init = IntegerLiteral::Create(
+      Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), AutoEntryResultSize), SizeTy,
+      SourceLocation());
+
+  if (!AutoEntryResultSizeDecl && SemaRef.TUScope) {
+    LookupResult LR(SemaRef, &II, SourceLocation(), Sema::LookupOrdinaryName);
+    if (SemaRef.LookupName(LR, SemaRef.TUScope)) {
+      for (NamedDecl *ND : LR) {
+        if (auto *VD = dyn_cast<VarDecl>(ND)) {
+          AutoEntryResultSizeDecl = VD;
+          break;
+        }
+      }
+    }
+  }
+  if (!AutoEntryResultSizeDecl) {
+    AutoEntryResultSizeDecl = VarDecl::Create(
+        Ctx, Ctx.getTranslationUnitDecl(), SourceLocation(), SourceLocation(),
+        &II, ConstSizeTy, Ctx.getTrivialTypeSourceInfo(ConstSizeTy),
+        SC_Extern);
+    Ctx.getTranslationUnitDecl()->addDecl(AutoEntryResultSizeDecl);
+  }
+  AutoEntryResultSizeDecl->setInit(Init);
+}
+
+void SemaGTaP::ActOnEndOfTranslationUnit() {
+  SmallVector<Decl *, 3> MetadataDecls;
+  if (AutoTaskDataSizeDecl && AutoTaskDataSizeDecl->hasInit())
+    MetadataDecls.push_back(AutoTaskDataSizeDecl);
+  if (AutoBlockTaskDataSizesDecl && AutoBlockTaskDataSizesDecl->hasInit())
+    MetadataDecls.push_back(AutoBlockTaskDataSizesDecl);
+  if (AutoEntryResultSizeDecl && AutoEntryResultSizeDecl->hasInit())
+    MetadataDecls.push_back(AutoEntryResultSizeDecl);
+
+  if (MetadataDecls.empty())
+    return;
+
+  ASTContext &Ctx = getASTContext();
+  DeclGroupRef MetadataDeclGroup = DeclGroupRef::Create(
+      Ctx, MetadataDecls.data(), MetadataDecls.size());
+  SemaRef.getASTConsumer().HandleTopLevelDecl(MetadataDeclGroup);
 }
 
 StmtResult SemaGTaP::ActOnGTaPExecutableDirective(GTaPDirectiveKind DKind,
@@ -1444,26 +1623,35 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   const bool IsBlockWorker =
       isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
   VarDecl *EntryResultBufferVar = nullptr;
+  DeclStmt *EntryResultBufferDecl = nullptr;
   if (IsBlockWorker && ResultDest && TaskInfo.ResultDstField) {
-    const uint64_t WorkerSize =
-        getMacroIntegerValue(SemaRef, "GTAP_BLOCK_SIZE", 1);
-    QualType BufferTy = Ctx.getConstantArrayType(
-        TaskInfo.ReturnType, llvm::APInt(64, WorkerSize), nullptr,
-        ArraySizeModifier::Normal, 0);
+    noteEntryResultSize(
+        Ctx.getTypeSizeInChars(TaskInfo.ReturnType).getQuantity());
+    FunctionDecl *GetEntryResultFn = requireRuntimeFunction(
+        SemaRef, "__gtap_get_entry_result_data", StartLoc);
+    if (!GetEntryResultFn)
+      return StmtError();
+    ExprResult Callee = SemaRef.BuildDeclRefExpr(
+        GetEntryResultFn, GetEntryResultFn->getType(), VK_LValue, StartLoc);
+    SmallVector<Expr *, 0> NoArgs;
+    ExprResult Call = SemaRef.BuildCallExpr(
+        nullptr, Callee.get(), StartLoc, NoArgs, EndLoc);
+    if (Call.isInvalid())
+      return StmtError();
+    QualType BufferTy = Ctx.getPointerType(TaskInfo.ReturnType);
+    Expr *BufferInit = CStyleCastExpr::Create(
+        Ctx, BufferTy, VK_PRValue, CK_BitCast, Call.get(), nullptr,
+        FPOptionsOverride(), Ctx.getTrivialTypeSourceInfo(BufferTy), StartLoc,
+        EndLoc);
     std::string BufferName = "__gtap_entry_result_" + FuncName + "_" +
                              std::to_string(StartLoc.getRawEncoding());
     IdentifierInfo &BufferId = Ctx.Idents.get(BufferName);
     EntryResultBufferVar = VarDecl::Create(
-        Ctx, Ctx.getTranslationUnitDecl(), StartLoc, StartLoc, &BufferId,
+        Ctx, SemaRef.CurContext, StartLoc, StartLoc, &BufferId,
         BufferTy, Ctx.getTrivialTypeSourceInfo(BufferTy), SC_None);
-    EntryResultBufferVar->setInit(
-        new (Ctx) ImplicitValueInitExpr(BufferTy));
-    EntryResultBufferVar->addAttr(CUDADeviceAttr::CreateImplicit(Ctx));
-    Ctx.getTranslationUnitDecl()->addDecl(EntryResultBufferVar);
-    Decl *BufferDecl = EntryResultBufferVar;
-    DeclGroupRef BufferDeclGroup =
-        DeclGroupRef::Create(Ctx, &BufferDecl, 1);
-    SemaRef.getASTConsumer().HandleTopLevelDecl(BufferDeclGroup);
+    EntryResultBufferVar->setInit(BufferInit);
+    EntryResultBufferDecl = new (Ctx) DeclStmt(
+        DeclGroupRef(EntryResultBufferVar), StartLoc, EndLoc);
   }
   std::string TaskPtrName = "__gtap_task_ptr_" + FuncName;
   
@@ -1531,30 +1719,24 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
           Ctx, TaskPtrVar->getType(), CK_LValueToRValue,
           TaskPtrRef, nullptr, VK_PRValue, FPOptionsOverride());
       
-      // Create arrow member access: __gtap_task_ptr_fib->param
-      ExprResult FieldAccessER = B.buildFieldAccess(TaskPtrRValue, true, Field, SourceLocation());
+      const bool IsPerThreadBlockField =
+          IsBlockWorker && TaskInfo.TaskLaneStorageRecord &&
+          Field->getParent() == TaskInfo.TaskLaneStorageRecord;
+      Expr *ThreadIndex = nullptr;
+      if (IsPerThreadBlockField) {
+        ThreadIndex = IntegerLiteral::Create(
+            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc);
+      }
+      ExprResult FieldAccessER = B.buildTaskFieldAccess(
+          TaskPtrRValue, true, Field, TaskInfo, ThreadIndex,
+          SourceLocation());
       if (FieldAccessER.isInvalid()) return StmtError();
       Expr *FieldAccess = FieldAccessER.get();
 
-      const bool IsPerThreadBlockField =
-          IsBlockWorker && Ctx.getAsConstantArrayType(Field->getType());
-      if (!IsPerThreadBlockField) {
-        ExprResult AssignER = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_Assign, FieldAccess, Arg);
-        if (AssignER.isInvalid()) return StmtError();
-        DeviceStmts.push_back(AssignER.get());
-      } else {
-        Expr *Zero = IntegerLiteral::Create(
-            Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc);
-        Expr *Indices[] = {Zero};
-        ExprResult Element = SemaRef.ActOnArraySubscriptExpr(
-            nullptr, FieldAccess, StartLoc, MultiExprArg(Indices, 1), EndLoc);
-        if (Element.isInvalid()) return StmtError();
-        ExprResult Assign = SemaRef.BuildBinOp(
-            nullptr, SourceLocation(), BO_Assign, Element.get(), Arg);
-        if (Assign.isInvalid()) return StmtError();
-        DeviceStmts.push_back(Assign.get());
-      }
+      ExprResult AssignER = SemaRef.BuildBinOp(
+          nullptr, SourceLocation(), BO_Assign, FieldAccess, Arg);
+      if (AssignER.isInvalid()) return StmtError();
+      DeviceStmts.push_back(AssignER.get());
       ++ArgIndex;
     }
     
@@ -1625,7 +1807,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
           EntryResultBufferVar, false, StartLoc,
           EntryResultBufferVar->getType(), VK_LValue);
       Expr *BufferPtr = ImplicitCastExpr::Create(
-          Ctx, Ctx.getPointerType(TaskInfo.ReturnType), CK_ArrayToPointerDecay,
+          Ctx, Ctx.getPointerType(TaskInfo.ReturnType), CK_LValueToRValue,
           BufferRef, nullptr, VK_PRValue, FPOptionsOverride());
       ExprResult AssignER = SemaRef.BuildBinOp(
           nullptr, SourceLocation(), BO_Assign, EntryDstER.get(), BufferPtr);
@@ -1874,6 +2056,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Create bool __gtap_is_master = (blockIdx.x == 0 && threadIdx.x == 0);
   Expr *MasterCond = buildThreadCondition();
   if (MasterCond) {
+      if (EntryResultBufferDecl)
+        FinalStmts.push_back(EntryResultBufferDecl);
       IdentifierInfo &MasterVarId = Ctx.Idents.get("__gtap_is_master");
       VarDecl *MasterVar = VarDecl::Create(
           Ctx, SemaRef.CurContext, StartLoc, StartLoc,
@@ -1991,6 +2175,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   }
   
   // Fallback if condition building failed (blockIdx/threadIdx not found)
+  if (EntryResultBufferDecl)
+    FinalStmts.push_back(EntryResultBufferDecl);
   FinalStmts.append(DeviceStmts.begin(), DeviceStmts.end());
   if (ExecuteStmt) FinalStmts.push_back(ExecuteStmt);
   FinalStmts.append(ResultStmts.begin(), ResultStmts.end());
@@ -2130,7 +2316,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // transform body
   GTaPExprBuilder B(SemaRef, SelfTypedVar);
   GTaPTaskBodyTransformer Transformer(
-      SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[CacheKey].ResultField,
+      SemaRef, B, SelfTypedVar, FieldMap, CachedTaskInfos[CacheKey],
+      CachedTaskInfos[CacheKey].ResultField,
       CachedTaskInfos[CacheKey].ResultDstField,
       CachedTaskInfos[CacheKey].SpawningThreadField,
       TidParam, CtxParam, FinishFn, ChildCountVar, IsBlockWorker);
@@ -2310,29 +2497,23 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
         continue;
       // Parameters that are not mutated or escaped use one uniform field for
       // the whole block and therefore require no state-0 lane broadcast.
-      if (!Ctx.getAsConstantArrayType(Field->getType()))
+      if (!TI.TaskLaneStorageRecord ||
+          Field->getParent() != TI.TaskLaneStorageRecord)
         continue;
 
-      ExprResult DstField = B.buildFieldAccess(
-          B.buildSelfRef(), /*IsArrow=*/true, Field, SourceLocation());
-      ExprResult SrcField = B.buildFieldAccess(
-          B.buildSelfRef(), /*IsArrow=*/true, Field, SourceLocation());
       ExprResult SpawnLane = B.buildFieldAccess(
           B.buildSelfRef(), /*IsArrow=*/true, TI.SpawningThreadField,
           SourceLocation());
       Expr *DstLane = buildThreadIdxXExpr(SemaRef, SourceLocation());
-      if (DstField.isInvalid() || SrcField.isInvalid() ||
-          SpawnLane.isInvalid() || !DstLane)
+      if (SpawnLane.isInvalid() || !DstLane)
         return nullptr;
 
-      Expr *DstIndices[] = {DstLane};
-      Expr *SrcIndices[] = {asRValue(SpawnLane.get())};
-      ExprResult Dst = SemaRef.ActOnArraySubscriptExpr(
-          nullptr, DstField.get(), SourceLocation(),
-          MultiExprArg(DstIndices, 1), SourceLocation());
-      ExprResult Src = SemaRef.ActOnArraySubscriptExpr(
-          nullptr, SrcField.get(), SourceLocation(),
-          MultiExprArg(SrcIndices, 1), SourceLocation());
+      ExprResult Dst = B.buildTaskFieldAccess(
+          B.buildSelfRef(), /*IsArrow=*/true, Field, TI, DstLane,
+          SourceLocation());
+      ExprResult Src = B.buildTaskFieldAccess(
+          B.buildSelfRef(), /*IsArrow=*/true, Field, TI,
+          asRValue(SpawnLane.get()), SourceLocation());
       if (Dst.isInvalid() || Src.isInvalid())
         return nullptr;
       ExprResult Assign = SemaRef.BuildBinOp(

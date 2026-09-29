@@ -2,14 +2,17 @@
 // RUN:   -std=c++17 -ast-dump %s | FileCheck %s
 // CHECK: RecordDecl {{.*}} struct fib_block_task_data definition
 // CHECK: FieldDecl {{.*}} n 'int'
+// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result 'int'
+// CHECK: FieldDecl {{.*}} __gtap_result_dst 'int *'
+// CHECK: RecordDecl {{.*}} struct fib_block_task_lane_storage definition
 // CHECK: FieldDecl {{.*}} __cap_x 'int[32]'
 // CHECK: FieldDecl {{.*}} __cap_y 'int[32]'
-// CHECK: FieldDecl {{.*}} __gtap_spawning_thread 'int'
+// CHECK: VarDecl {{.*}} __gtap_auto_block_task_data_sizes 'const unsigned long[33]' extern cinit
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_fib_block
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join_block'
 
 #define __device__ __attribute__((device))
-#define GTAP_BLOCK_SIZE 32
 #define __GTAP_WORKER_IS_BLOCK 1
 
 struct TaskContext {};

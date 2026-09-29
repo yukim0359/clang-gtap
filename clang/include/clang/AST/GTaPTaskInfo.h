@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "clang/Analysis/CFG.h"
+#include <cstdint>
 #include <vector>
 
 namespace clang {
@@ -35,6 +36,10 @@ struct GTaPTaskFunctionInfo {
   std::vector<VarDecl *> CapturedVariables;
   QualType ReturnType;
   RecordDecl *TaskRecord = nullptr;
+  /// SoA storage for lane-private fields, repeated once per warp.
+  RecordDecl *TaskLaneStorageRecord = nullptr;
+  uint64_t TaskLaneStorageOffset = 0;
+  uint64_t TaskLaneStorageSize = 0;
   bool TaskRecordInvalid = false;
   std::vector<FieldDecl *> ParameterFields;
   std::vector<FieldDecl *> CapturedFields;
