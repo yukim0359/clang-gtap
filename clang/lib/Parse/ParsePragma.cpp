@@ -266,35 +266,6 @@ private:
     // 'function' token was already consumed by HandlePragma
     PP.Lex(Tok); // Get next token
 
-    while (Tok.is(tok::identifier)) {
-      StringRef Name = Tok.getIdentifierInfo()->getName();
-
-      if (Name == "worker_size") {
-        // Optional backward-compatible clause: worker_size(thread|block).
-        // The value is ignored; worker type is determined by __GTAP_WORKER_IS_THREAD|BLOCK.
-        PP.Lex(Tok); // consume 'worker_size'
-        if (!Tok.is(tok::l_paren)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << "(";
-          return;
-        }
-        PP.Lex(Tok); // consume '('
-        if (!Tok.is(tok::identifier)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << "identifier";
-          return;
-        }
-        PP.Lex(Tok); // consume 'thread' or 'block'
-        if (!Tok.is(tok::r_paren)) {
-          PP.Diag(Tok.getLocation(), diag::err_expected) << ")";
-          return;
-        }
-        PP.Lex(Tok); // consume ')'
-        continue;
-      }
-
-      // Unknown clause name -> stop and let "extra tokens" warning handle it
-      break;
-    }
-
     // Expect end of pragma
     if (!Tok.is(tok::eod)) {
       PP.Diag(Tok.getLocation(), diag::warn_pragma_extra_tokens_at_eol) << "gtap function";

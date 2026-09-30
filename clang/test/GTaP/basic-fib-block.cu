@@ -13,7 +13,7 @@
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join_block'
 
 #define __device__ __attribute__((device))
-#define __GTAP_WORKER_IS_BLOCK 1
+#define __GTAP_IS_BLOCK_MODE 1
 
 struct TaskContext {};
 struct uint3 { unsigned x, y, z; };

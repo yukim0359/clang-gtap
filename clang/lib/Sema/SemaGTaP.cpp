@@ -311,7 +311,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
   ASTContext &Ctx = S.getASTContext();
   FieldMap.clear();
-  const bool IsBlockWorker = isMacroDefined(S, "__GTAP_WORKER_IS_BLOCK");
+  const bool IsBlockWorker = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
 
   if (TaskInfo.TaskRecordInvalid)
     return nullptr;
@@ -889,7 +889,7 @@ public:
       
       QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(CalleeTaskRecord));
       const bool IsBlockWorker =
-          isMacroDefined(Base::getSema(), "__GTAP_WORKER_IS_BLOCK");
+          isMacroDefined(Base::getSema(), "__GTAP_IS_BLOCK_MODE");
       QualType VoidTy = Ctx.VoidTy;
       QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
       QualType IntTy = Ctx.IntTy;
@@ -1621,7 +1621,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   QualType IntTy = Ctx.IntTy;
   QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
   const bool IsBlockWorker =
-      isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
+      isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
   VarDecl *EntryResultBufferVar = nullptr;
   DeclStmt *EntryResultBufferDecl = nullptr;
   if (IsBlockWorker && ResultDest && TaskInfo.ResultDstField) {
@@ -2255,7 +2255,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType IntTy = Ctx.IntTy;
-  const bool IsBlockWorker = isMacroDefined(SemaRef, "__GTAP_WORKER_IS_BLOCK");
+  const bool IsBlockWorker = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
 
   QualType TaskCtxPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType TaskCtxTy = lookupNamedType(SemaRef, "TaskContext");
