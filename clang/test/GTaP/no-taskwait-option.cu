@@ -4,7 +4,6 @@
 #define __device__ __attribute__((device))
 
 struct TaskContext {};
-constexpr unsigned long long __gtap_max_task_size = ~0ULL;
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
 __device__ bool __gtap_set_state_for_join(int, int, int, int);

@@ -171,10 +171,6 @@ def note_constexpr_assert_failed : Note<
 
 def err_gtap_function_requires_compound_body : Error<
   "gtap task functions must have a compound statement body">;
-def err_gtap_max_task_size_not_found : Error<
-  "missing '__gtap_max_task_size'; define it before using gtap pragmas">;
-def err_gtap_task_record_too_large : Error<
-  "gtap task data size (%0 bytes) exceeds '__gtap_max_task_size' (%1 bytes)">;
 def err_gtap_task_data_non_trivially_copyable : Error<
   "gtap task-data field %0 has non-trivially-copyable type %1">;
 def err_gtap_runtime_function_not_found : Error<

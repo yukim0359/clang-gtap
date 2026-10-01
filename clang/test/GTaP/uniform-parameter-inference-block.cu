@@ -24,7 +24,6 @@
 struct TaskContext {};
 struct uint3 { unsigned x, y, z; };
 extern __device__ const uint3 threadIdx;
-constexpr unsigned long long __gtap_max_task_size = ~0ULL;
 using TaskFn = void (*)(void *, int, TaskContext *);
 __device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
 __device__ void __gtap_finish_task(int, TaskContext *);

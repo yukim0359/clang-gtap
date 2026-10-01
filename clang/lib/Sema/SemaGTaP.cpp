@@ -192,61 +192,6 @@ static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
   return ThreadIdxX.isInvalid() ? nullptr : ThreadIdxX.get();
 }
 
-static bool getGTaPMaxTaskSizeFromConstexpr(Sema &S, SourceLocation Loc,
-                                          uint64_t &Out) {
-  ASTContext &Ctx = S.getASTContext();
-  if (!S.TUScope) return false;
-
-  IdentifierInfo &II = Ctx.Idents.get("__gtap_max_task_size");
-  LookupResult LR(S, &II, Loc, Sema::LookupOrdinaryName);
-  if (!S.LookupName(LR, S.TUScope)) return false;
-
-  for (NamedDecl *ND : LR) {
-    if (auto *VD = dyn_cast<VarDecl>(ND)) {
-      const Expr *Init = VD->getAnyInitializer();
-      if (!Init) continue;
-
-      Expr::EvalResult ER;
-      if (!Init->EvaluateAsInt(ER, Ctx)) continue;
-      if (!ER.Val.isInt()) continue;
-
-      llvm::APSInt V = ER.Val.getInt();
-      if (V.isSigned() && V.isNegative()) continue;
-
-      Out = V.getZExtValue();
-      return true;
-    }
-
-    if (auto *ED = dyn_cast<EnumConstantDecl>(ND)) {
-      llvm::APSInt V = ED->getInitVal();
-      if (V.isSigned() && V.isNegative()) continue;
-
-      Out = V.getZExtValue();
-      return true;
-    }
-  }
-  return false;
-}
-
-static void checkTaskRecordSizeOrDiag(Sema &S, SourceLocation Loc, QualType TaskRecordTy) {
-  ASTContext &Ctx = S.getASTContext();
-
-  uint64_t MaxBytes = 0;
-  if (!getGTaPMaxTaskSizeFromConstexpr(S, Loc, MaxBytes)) {
-    S.Diag(Loc, diag::err_gtap_max_task_size_not_found);
-    return;
-  }
-
-  if (S.RequireCompleteType(Loc, TaskRecordTy, diag::err_typecheck_incomplete_tag))
-    return;
-
-  uint64_t Bytes = Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity();
-  S.GTaP().noteTaskRecordSize(Bytes);
-  if (Bytes > MaxBytes) {
-    S.Diag(Loc, diag::err_gtap_task_record_too_large) << Bytes << MaxBytes;
-  }
-}
-
 static bool checkTaskDataFieldTypeOrDiag(Sema &S, SourceLocation Loc,
                                          StringRef FieldName, QualType FieldTy) {
   if (FieldTy.isNull())
@@ -311,7 +256,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
   ASTContext &Ctx = S.getASTContext();
   FieldMap.clear();
-  const bool IsBlockWorker = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
+  const bool IsBlockMode = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
 
   if (TaskInfo.TaskRecordInvalid)
     return nullptr;
@@ -335,7 +280,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     RD->startDefinition();
 
     RecordDecl *LaneStorageRD = nullptr;
-    if (IsBlockWorker) {
+    if (IsBlockMode) {
       std::string LaneStorageRecordName =
           FD->getName().str() + "_task_lane_storage";
       IdentifierInfo &LaneStorageRecordId =
@@ -384,7 +329,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       }
       QualType FieldTy = Param->getType();
       const bool IsUniformBlockParameter =
-          IsBlockWorker &&
+          IsBlockMode &&
           CurrentParamIndex < TaskInfo.ParameterIsUniform.size() &&
           TaskInfo.ParameterIsUniform[CurrentParamIndex];
       // Task-data fields are initialized after allocation, so their storage
@@ -398,7 +343,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       // is evaluated once by the spawning thread; state 0 of the child then
       // expands that value into the other elements of this array.
       RecordDecl *StorageRD = RD;
-      if (IsBlockWorker && !IsUniformBlockParameter) {
+      if (IsBlockMode && !IsUniformBlockParameter) {
         FieldTy = Ctx.getConstantArrayType(
             FieldTy, llvm::APInt(64, GTaPExprBuilder::LaneStorageWidth),
             nullptr,
@@ -427,14 +372,14 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
-      if (IsBlockWorker) {
+      if (IsBlockMode) {
         FieldTy = Ctx.getConstantArrayType(
             FieldTy, llvm::APInt(64, GTaPExprBuilder::LaneStorageWidth),
             nullptr,
             ArraySizeModifier::Normal, 0);
       }
       FieldDecl *Field = addField(
-          IsBlockWorker ? LaneStorageRD : RD, FieldName, FieldTy);
+          IsBlockMode ? LaneStorageRD : RD, FieldName, FieldTy);
       TaskInfo.CapturedFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(VD->getCanonicalDecl())] = Field;
     }
@@ -449,7 +394,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     // encountered by one CUDA thread.  Remember that thread so the callee can
     // expand its argument values into the per-thread parameter slots when it
     // first starts executing.
-    if (IsBlockWorker)
+    if (IsBlockMode)
       TaskInfo.SpawningThreadField =
           addField(RD, "__gtap_spawning_thread", Ctx.IntTy);
     if (!TaskInfo.ReturnType.isNull() && !TaskInfo.ReturnType->isVoidType()) {
@@ -472,8 +417,9 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       Ctx.getTranslationUnitDecl()->addDecl(LaneStorageRD);
     TaskInfo.TaskRecord = RD;
     QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(RD));
-    if (!IsBlockWorker) {
-      checkTaskRecordSizeOrDiag(S, FD->getLocation(), TaskRecordTy);
+    if (!IsBlockMode) {
+      S.GTaP().noteTaskRecordSize(
+          Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity());
     } else {
       uint64_t FixedBytes = Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity();
       uint64_t LaneStorageBytes = 0;
@@ -527,7 +473,6 @@ class GTaPTaskBodyTransformer
   ParmVarDecl *CtxParam;
   FunctionDecl *FinishDecl;
   VarDecl *ChildCountVar;  // Function-level child_count variable
-  bool IsBlockWorker;
   unsigned NextWaitId = 0;
 
   bool InTaskDirective;
@@ -539,8 +484,7 @@ public:
                          FieldDecl *ResultDstField,
                          FieldDecl *SpawningThreadField,
                          ParmVarDecl *TidParam, ParmVarDecl *CtxParam,
-                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar,
-                         bool IsBlockWorker)
+                         FunctionDecl *FinishDecl, VarDecl *ChildCountVar)
       : Base(S), B(B), Ctx(S.getASTContext()), SelfDecl(SelfDecl),
         FieldMap(std::move(FieldMap)), TaskInfo(TaskInfo),
         ResultField(ResultField),
@@ -548,7 +492,7 @@ public:
         SpawningThreadField(SpawningThreadField),
         TidParam(TidParam), CtxParam(CtxParam),
         FinishDecl(FinishDecl), ChildCountVar(ChildCountVar),
-        IsBlockWorker(IsBlockWorker), InTaskDirective(false) {}
+        InTaskDirective(false) {}
 
   // Generic hooks: log every statement we are about to transform.
   // We must preserve both overloads from TreeTransform:
@@ -888,7 +832,7 @@ public:
       }
       
       QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(CalleeTaskRecord));
-      const bool IsBlockWorker =
+      const bool IsBlockMode =
           isMacroDefined(Base::getSema(), "__GTAP_IS_BLOCK_MODE");
       QualType VoidTy = Ctx.VoidTy;
       QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
@@ -950,7 +894,7 @@ public:
           Ctx, StateMachinePtrTy, CK_FunctionToPointerDecay, StateMachineRef, nullptr, VK_PRValue, FPOptionsOverride());
       
       Expr *ChildCountArg = nullptr;
-      if (IsBlockWorker) {
+      if (IsBlockMode) {
         ChildCountArg = CStyleCastExpr::Create(
             Ctx, IntPtrTy, VK_PRValue, CK_NullToPointer,
             IntegerLiteral::Create(Ctx, llvm::APInt(64, 0), Ctx.IntTy,
@@ -1086,7 +1030,7 @@ public:
             if (FieldIt != CalleeFieldMap.end()) {
               FieldDecl *Field = FieldIt->second;
               const bool IsPerThreadBlockField =
-                  IsBlockWorker && CalleeTaskInfo.TaskLaneStorageRecord &&
+                  IsBlockMode && CalleeTaskInfo.TaskLaneStorageRecord &&
                   Field->getParent() == CalleeTaskInfo.TaskLaneStorageRecord;
               Expr *ThreadIndex = nullptr;
               if (IsPerThreadBlockField) {
@@ -1620,11 +1564,11 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Create helper function to build task pointer declaration and initialization
   QualType IntTy = Ctx.IntTy;
   QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
-  const bool IsBlockWorker =
+  const bool IsBlockMode =
       isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
   VarDecl *EntryResultBufferVar = nullptr;
   DeclStmt *EntryResultBufferDecl = nullptr;
-  if (IsBlockWorker && ResultDest && TaskInfo.ResultDstField) {
+  if (IsBlockMode && ResultDest && TaskInfo.ResultDstField) {
     noteEntryResultSize(
         Ctx.getTypeSizeInChars(TaskInfo.ReturnType).getQuantity());
     FunctionDecl *GetEntryResultFn = requireRuntimeFunction(
@@ -1720,7 +1664,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
           TaskPtrRef, nullptr, VK_PRValue, FPOptionsOverride());
       
       const bool IsPerThreadBlockField =
-          IsBlockWorker && TaskInfo.TaskLaneStorageRecord &&
+          IsBlockMode && TaskInfo.TaskLaneStorageRecord &&
           Field->getParent() == TaskInfo.TaskLaneStorageRecord;
       Expr *ThreadIndex = nullptr;
       if (IsPerThreadBlockField) {
@@ -1919,7 +1863,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Access the root result after the collective scheduler loop.
   SmallVector<Stmt *, 8> ResultStmts;
   
-  if (ResultDest && IsBlockWorker && EntryResultBufferVar) {
+  if (ResultDest && IsBlockMode && EntryResultBufferVar) {
     Expr *ResultAccess = DeclRefExpr::Create(
         Ctx, NestedNameSpecifierLoc(), SourceLocation(), EntryResultBufferVar,
         false, StartLoc, EntryResultBufferVar->getType(), VK_LValue);
@@ -1939,7 +1883,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     if (AssignER.isInvalid())
       return StmtError();
     ResultStmts.push_back(AssignER.get());
-  } else if (ResultDest && !IsBlockWorker && TaskInfo.ResultField &&
+  } else if (ResultDest && !IsBlockMode && TaskInfo.ResultField &&
              GetTaskDataFn) {
     auto [ResultTaskPtrVar, ResultTaskPtrDeclStmt] = createTaskPtrDecl();
     if (ResultTaskPtrVar && ResultTaskPtrDeclStmt) {
@@ -2115,7 +2059,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
             Ctx, NestedNameSpecifierLoc(), SourceLocation(), MasterVar,
             false, StartLoc, Ctx.BoolTy, VK_LValue);
         Expr *MasterCheck2 = nullptr;
-        if (!IsBlockWorker) {
+        if (!IsBlockMode) {
           MasterCheck2 = ImplicitCastExpr::Create(
               Ctx, Ctx.BoolTy, CK_LValueToRValue, MasterVarRef2, nullptr,
               VK_PRValue, FPOptionsOverride());
@@ -2255,7 +2199,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType IntTy = Ctx.IntTy;
-  const bool IsBlockWorker = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
+  const bool IsBlockMode = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
 
   QualType TaskCtxPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType TaskCtxTy = lookupNamedType(SemaRef, "TaskContext");
@@ -2295,7 +2239,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   VarDecl *ChildCountVar = nullptr;
   DeclStmt *ChildCountDeclStmt = nullptr;
-  if (!IsBlockWorker) {
+  if (!IsBlockMode) {
     IdentifierInfo &ChildCountId = Ctx.Idents.get("__gtap_child_count");
     ChildCountVar = VarDecl::Create(
         Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &ChildCountId,
@@ -2320,7 +2264,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       CachedTaskInfos[CacheKey].ResultField,
       CachedTaskInfos[CacheKey].ResultDstField,
       CachedTaskInfos[CacheKey].SpawningThreadField,
-      TidParam, CtxParam, FinishFn, ChildCountVar, IsBlockWorker);
+      TidParam, CtxParam, FinishFn, ChildCountVar);
   StmtResult Transformed = Transformer.TransformStmt(Body);
   if (Transformed.isInvalid())
     return StmtError();
@@ -2377,7 +2321,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // set_state_for_join call
   FunctionDecl *SetStateForJoinFn = requireRuntimeFunction(
       SemaRef,
-      IsBlockWorker ? "__gtap_set_state_for_join_block" : "__gtap_set_state_for_join",
+      IsBlockMode ? "__gtap_set_state_for_join_block" : "__gtap_set_state_for_join",
       Body->getBeginLoc());
   if (!SetStateForJoinFn)
     return StmtError();
@@ -2410,7 +2354,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     // args: (tid, child_count_or_ctx, next_state, queue)
     SmallVector<Expr*, 4> Args;
     Args.push_back(asRValue(buildParamLValue(TidParam)));
-    Args.push_back(IsBlockWorker ? asRValue(buildParamLValue(CtxParam))
+    Args.push_back(IsBlockMode ? asRValue(buildParamLValue(CtxParam))
                                   : buildChildCountRValue());
     Args.push_back(IntegerLiteral::Create(
         Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), NextState),
@@ -2487,7 +2431,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // state 0: repeating it after a taskwait would overwrite parameter mutations.
   auto buildBlockArgumentBroadcast = [&]() -> Stmt * {
     GTaPTaskFunctionInfo &TI = CachedTaskInfos[CacheKey];
-    if (!IsBlockWorker || !TI.SpawningThreadField ||
+    if (!IsBlockMode || !TI.SpawningThreadField ||
         TI.ParameterFields.empty())
       return nullptr;
 
