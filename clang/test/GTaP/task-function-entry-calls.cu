@@ -18,7 +18,7 @@ __device__ int __gtap_get_task_state(int);
 __device__ bool __gtap_set_state_for_join(int, int, int, int);
 __device__ void *__gtap_get_task_data(int);
 __device__ void __gtap_push_initial_task(TaskFn, int);
-__device__ void __gtap_execute_task_loop_device();
+__device__ void __gtap_execute_task_loop();
 
 #pragma gtap function
 __device__ int entry_child(int x) { return x + 1; }

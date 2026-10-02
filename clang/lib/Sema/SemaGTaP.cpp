@@ -1835,7 +1835,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   
   // Execute task loop on device (ALL THREADS)
   Stmt *ExecuteStmt = nullptr;
-  FunctionDecl *ExecuteLoopFn = requireRuntimeFunction(SemaRef, "__gtap_execute_task_loop_device", StartLoc);
+  FunctionDecl *ExecuteLoopFn = requireRuntimeFunction(SemaRef, "__gtap_execute_task_loop", StartLoc);
   if (!ExecuteLoopFn)
     return StmtError();
   
@@ -1847,7 +1847,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   
   if (!ExecuteCall.isInvalid()) {
     ExecuteStmt = ExecuteCall.get();
-    // llvm::errs() << "[GTaP][Sema] Generated __gtap_execute_task_loop_device call (for all threads)\n";
+    // llvm::errs() << "[GTaP][Sema] Generated __gtap_execute_task_loop call (for all threads)\n";
   }
   
   // Access the root result after the collective scheduler loop.
@@ -2038,7 +2038,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       // Add execute statement (all threads)
       if (ExecuteStmt) {
         FinalStmts.push_back(ExecuteStmt);
-        // llvm::errs() << "[GTaP][Sema] Added execute_task_loop_device call (runs on all threads)\n";
+        // llvm::errs() << "[GTaP][Sema] Added __gtap_execute_task_loop call (runs on all threads)\n";
       }
       
       // Thread mode copies its scalar result on the grid master.  In block
