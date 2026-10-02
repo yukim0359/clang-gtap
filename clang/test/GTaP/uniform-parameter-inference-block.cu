@@ -21,7 +21,10 @@
 #define __device__ __attribute__((device))
 #define __GTAP_IS_BLOCK_MODE 1
 
+namespace gtap::detail::block {
 struct TaskContext {};
+}
+using TaskContext = gtap::detail::block::TaskContext;
 struct uint3 { unsigned x, y, z; };
 extern __device__ const uint3 threadIdx;
 using TaskFn = void (*)(void *, int, TaskContext *);

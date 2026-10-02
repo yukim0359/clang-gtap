@@ -8,7 +8,10 @@
 
 #define __device__ __attribute__((device))
 
+namespace gtap::detail::thread {
 struct TaskContext {};
+}
+using TaskContext = gtap::detail::thread::TaskContext;
 using TaskFn = void (*)(void *, int, TaskContext *);
 __device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
 __device__ void __gtap_finish_task(int, TaskContext *);

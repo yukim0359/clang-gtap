@@ -4,7 +4,10 @@
 #define __device__ __attribute__((device))
 #define __global__ __attribute__((global))
 
+namespace gtap::detail::thread {
 struct TaskContext {};
+}
+using TaskContext = gtap::detail::thread::TaskContext;
 struct uint3 { unsigned x, y, z; };
 extern __device__ const uint3 blockIdx;
 extern __device__ const uint3 threadIdx;

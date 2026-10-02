@@ -153,18 +153,42 @@ static FunctionDecl *requireRuntimeFunction(Sema &S, StringRef Name, SourceLocat
   return nullptr;
 }
 
-static QualType lookupNamedType(Sema &S, StringRef Name) {
-  if (!S.TUScope)
+static NamespaceDecl *lookupNamespace(Sema &S, DeclContext *DC, StringRef Name) {
+  if (!DC)
+    return nullptr;
+  IdentifierInfo &II = S.Context.Idents.get(Name);
+  LookupResult LR(S, &II, SourceLocation(), Sema::LookupOrdinaryName);
+  if (!S.LookupQualifiedName(LR, DC))
+    return nullptr;
+  for (NamedDecl *ND : LR) {
+    if (auto *NS = dyn_cast<NamespaceDecl>(ND))
+      return NS;
+  }
+  return nullptr;
+}
+
+static QualType lookupTypeInContext(Sema &S, DeclContext *DC, StringRef Name) {
+  if (!DC)
     return QualType();
   IdentifierInfo &II = S.Context.Idents.get(Name);
   LookupResult LR(S, &II, SourceLocation(), Sema::LookupOrdinaryName);
-  if (!S.LookupName(LR, S.TUScope))
+  if (!S.LookupQualifiedName(LR, DC))
     return QualType();
   for (NamedDecl *ND : LR) {
     if (auto *TD = dyn_cast<TypeDecl>(ND))
       return S.Context.getTypeDeclType(TD);
   }
   return QualType();
+}
+
+static QualType lookupTaskContext(Sema &S) {
+  DeclContext *TU = S.Context.getTranslationUnitDecl();
+  NamespaceDecl *Gtap = lookupNamespace(S, TU, "gtap");
+  NamespaceDecl *Detail = lookupNamespace(S, Gtap, "detail");
+  const bool IsBlockMode = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
+  StringRef ModeNS = IsBlockMode ? "block" : "thread";
+  NamespaceDecl *Mode = lookupNamespace(S, Detail, ModeNS);
+  return lookupTypeInContext(S, Mode, "TaskContext");
 }
 
 static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
@@ -839,7 +863,7 @@ public:
       QualType IntTy = Ctx.IntTy;
       QualType IntPtrTy = Ctx.getPointerType(IntTy);
       QualType TaskCtxPtrTy = VoidPtrTy;
-      if (QualType TaskCtxTy = lookupNamedType(Base::getSema(), "TaskContext");
+      if (QualType TaskCtxTy = lookupTaskContext(Base::getSema());
           !TaskCtxTy.isNull()) {
         TaskCtxPtrTy = Ctx.getPointerType(TaskCtxTy);
       }
@@ -1766,7 +1790,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(VoidTy);
   QualType TaskCtxPtrTy = VoidPtrTy;
-  if (QualType TaskCtxTy = lookupNamedType(SemaRef, "TaskContext"); !TaskCtxTy.isNull())
+  if (QualType TaskCtxTy = lookupTaskContext(SemaRef); !TaskCtxTy.isNull())
     TaskCtxPtrTy = Ctx.getPointerType(TaskCtxTy);
 
   SmallVector<QualType, 3> FuncPtrParamTypes = {VoidPtrTy, IntTy, TaskCtxPtrTy};
@@ -2202,7 +2226,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   const bool IsBlockMode = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
 
   QualType TaskCtxPtrTy = Ctx.getPointerType(Ctx.VoidTy);
-  QualType TaskCtxTy = lookupNamedType(SemaRef, "TaskContext");
+  QualType TaskCtxTy = lookupTaskContext(SemaRef);
   if (!TaskCtxTy.isNull())
     TaskCtxPtrTy = Ctx.getPointerType(TaskCtxTy);
   

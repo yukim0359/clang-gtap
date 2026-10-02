@@ -3,7 +3,10 @@
 
 #define __device__ __attribute__((device))
 
+namespace gtap::detail::thread {
 struct TaskContext {};
+}
+using TaskContext = gtap::detail::thread::TaskContext;
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
 __device__ bool __gtap_set_state_for_join(int, int, int, int);
