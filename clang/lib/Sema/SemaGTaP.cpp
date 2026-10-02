@@ -1517,8 +1517,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     return StmtError();
   
   FunctionDecl *CalleeDecl = EntryCall->getDirectCallee();
-  if (!CalleeDecl) {
-    SemaRef.Diag(StartLoc, diag::err_gtap_entry_no_callee);
+  if (!CalleeDecl || !isGTaPTaskFunction(CalleeDecl)) {
+    SemaRef.Diag(StartLoc, diag::err_gtap_entry_invalid_statement);
     return StmtError();
   }
   

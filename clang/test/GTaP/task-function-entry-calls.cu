@@ -33,3 +33,11 @@ __global__ void invalid_nested_entry() {
   // expected-error@+1 {{direct call to GTaP task function 'entry_child' is not supported; use '#pragma gtap task' to spawn it}}
   entry_child(entry_child(1));
 }
+
+__device__ int ordinary_entry(int x) { return x; }
+
+__global__ void invalid_entry_not_task_function() {
+  // expected-error@+1 {{#pragma gtap entry must be followed by a direct call to a GTaP task function or an assignment from such a call}}
+#pragma gtap entry
+  ordinary_entry(1);
+}

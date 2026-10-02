@@ -184,9 +184,7 @@ def err_gtap_direct_task_function_call : Error<
 def err_gtap_taskwait_in_switch : Error<
   "#pragma gtap taskwait inside a switch statement is not supported">;
 def err_gtap_entry_invalid_statement : Error<
-  "#pragma gtap entry must be followed by a function call or assignment with function call">;
-def err_gtap_entry_no_callee : Error<
-  "#pragma gtap entry: cannot determine function to call">;
+  "#pragma gtap entry must be followed by a direct call to a GTaP task function or an assignment from such a call">;
 
 // Semantic analysis of constant literals.
 def ext_predef_outside_function : Warning<
