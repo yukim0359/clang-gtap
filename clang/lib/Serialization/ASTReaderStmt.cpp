@@ -2584,10 +2584,6 @@ void ASTStmtReader::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *D) {
   VisitStmt(D);
 }
 
-void ASTStmtReader::VisitGTaPInitDirective(GTaPInitDirective *D) {
-  VisitStmt(D);
-}
-
 void ASTStmtReader::VisitGTaPEntryDirective(GTaPEntryDirective *D) {
   VisitStmt(D);
 }
@@ -3734,10 +3730,6 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
 
     case STMT_GTAP_TASKWAIT_DIRECTIVE:
       S = GTaPTaskwaitDirective::CreateEmpty(Context, Empty);
-      break;
-
-    case STMT_GTAP_INIT_DIRECTIVE:
-      S = GTaPInitDirective::CreateEmpty(Context, Empty);
       break;
 
     case STMT_GTAP_ENTRY_DIRECTIVE:

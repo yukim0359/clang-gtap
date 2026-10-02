@@ -85,7 +85,6 @@ class OMPUseDevicePtrClause;
 class OMPUseDeviceAddrClause;
 class SVETypeFlags;
 class OMPExecutableDirective;
-class GTaPInitDirective;
 class GTaPTaskDirective;
 class GTaPTaskwaitDirective;
 class GTaPEntryDirective;

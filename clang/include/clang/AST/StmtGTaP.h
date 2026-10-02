@@ -23,7 +23,6 @@ namespace clang {
 /// This represents directives like:
 ///   #pragma gtap task
 ///   #pragma gtap taskwait
-///   #pragma gtap init
 ///   #pragma gtap entry
 
 class GTaPExecutableDirective : public Stmt {
@@ -229,73 +228,6 @@ public:
 
   void setWaitId(unsigned I) { WaitId = I; }
   unsigned getWaitId() const { return WaitId; }
-};
-
-/// This represents '#pragma gtap init' directive.
-///
-/// \code
-/// #pragma gtap init
-/// \endcode
-///
-class GTaPInitDirective : public GTaPExecutableDirective {
-  friend class ASTStmtReader;
-  friend class GTaPExecutableDirective;
-
-  /// Runtime type identifier (e.g., "thread", "block").
-  StringRef RuntimeType;
-  /// Function name identifier (e.g., "fib").
-  StringRef FunctionName;
-
-  /// Build directive with the given start and end location.
-  ///
-  /// \param StartLoc Starting location of the directive kind.
-  /// \param EndLoc Ending location of the directive.
-  /// \param RT Runtime type identifier.
-  /// \param FN Function name identifier.
-  ///
-  GTaPInitDirective(SourceLocation StartLoc, SourceLocation EndLoc,
-                   StringRef RT, StringRef FN)
-      : GTaPExecutableDirective(GTaPInitDirectiveClass,
-                               GTaPDirectiveKind::GTaPD_init,
-                               StartLoc,
-                               EndLoc),
-        RuntimeType(RT), FunctionName(FN) {}
-
-  /// Build an empty directive.
-  ///
-  explicit GTaPInitDirective()
-      : GTaPExecutableDirective(GTaPInitDirectiveClass,
-                               GTaPDirectiveKind::GTaPD_init,
-                               SourceLocation(),
-                               SourceLocation()) {}
-
-public:
-  /// Creates directive.
-  ///
-  /// \param C AST context.
-  /// \param StartLoc Starting location of the directive kind.
-  /// \param EndLoc Ending Location of the directive.
-  /// \param RT Runtime type identifier.
-  /// \param FN Function name identifier.
-  ///
-  static GTaPInitDirective *Create(const ASTContext &C, SourceLocation StartLoc, SourceLocation EndLoc,
-                                  StringRef RT, StringRef FN);
-
-  /// Creates an empty directive.
-  ///
-  /// \param C AST context.
-  ///
-  static GTaPInitDirective *CreateEmpty(const ASTContext &C, EmptyShell);
-
-  /// Get the runtime type identifier.
-  StringRef getRuntimeType() const { return RuntimeType; }
-
-  /// Get the function name identifier.
-  StringRef getFunctionName() const { return FunctionName; }
-
-  static bool classof(const Stmt *T) {
-    return T->getStmtClass() == GTaPInitDirectiveClass;
-  }
 };
 
 /// This represents '#pragma gtap entry' directive.

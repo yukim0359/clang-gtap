@@ -53,29 +53,6 @@ GTaPTaskwaitDirective *GTaPTaskwaitDirective::CreateEmpty(const ASTContext &C,
 }
 
 //===----------------------------------------------------------------------===//
-// GTaPInitDirective
-//===----------------------------------------------------------------------===//
-
-GTaPInitDirective *GTaPInitDirective::Create(const ASTContext &C,
-                                             SourceLocation StartLoc,
-                                             SourceLocation EndLoc,
-                                             StringRef RT, StringRef FN) {
-  // Allocate and copy the strings to the AST context for persistence
-  // Use IdentifierTable to get or create identifiers, which are interned in the AST context
-  StringRef RuntimeType = RT.empty() ? StringRef() : C.Idents.get(RT).getName();
-  StringRef FunctionName = FN.empty() ? StringRef() : C.Idents.get(FN).getName();
-  
-  void *Mem = C.Allocate(sizeof(GTaPInitDirective), alignof(GTaPInitDirective));
-  return new (Mem) GTaPInitDirective(StartLoc, EndLoc, RuntimeType, FunctionName);
-}
-
-GTaPInitDirective *GTaPInitDirective::CreateEmpty(const ASTContext &C,
-                                                  EmptyShell) {
-  void *Mem = C.Allocate(sizeof(GTaPInitDirective), alignof(GTaPInitDirective));
-  return new (Mem) GTaPInitDirective();
-}
-
-//===----------------------------------------------------------------------===//
 // GTaPEntryDirective
 //===----------------------------------------------------------------------===//
 

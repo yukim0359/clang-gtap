@@ -746,9 +746,6 @@ CXCursor cxcursor::MakeCXCursor(const Stmt *S, const Decl *Parent,
   case Stmt::GTaPTaskwaitDirectiveClass:
     K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
     break;
-  case Stmt::GTaPInitDirectiveClass:
-    K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
-    break;
   case Stmt::GTaPEntryDirectiveClass:
     K = CXCursor_NotImplemented; // TODO: Add GTaP cursor kinds
     break;

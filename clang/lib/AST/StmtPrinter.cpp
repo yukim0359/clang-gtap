@@ -898,11 +898,6 @@ void StmtPrinter::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *Node) {
   OS << "\n";
 }
 
-void StmtPrinter::VisitGTaPInitDirective(GTaPInitDirective *Node) {
-  Indent() << "#pragma gtap init";
-  OS << "\n";
-}
-
 void StmtPrinter::VisitGTaPEntryDirective(GTaPEntryDirective *Node) {
   Indent() << "#pragma gtap entry";
   OS << "\n";

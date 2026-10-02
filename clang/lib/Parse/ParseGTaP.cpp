@@ -74,10 +74,6 @@ StmtResult Parser::ParseGTaPExecutableDirective() {
     return StmtError();
   }
 
-  // Parse arguments for init directive: #pragma gtap init
-  StringRef RuntimeType;
-  StringRef FunctionName;
-
   Expr *QueueExpr = nullptr;
   if (DKind == GTaPDirectiveKind::GTaPD_task || DKind == GTaPDirectiveKind::GTaPD_taskwait) {
     while (getCurToken().is(tok::identifier)) {
@@ -155,10 +151,6 @@ StmtResult Parser::ParseGTaPExecutableDirective() {
   }
 
   // Build AST nodes through Sema.
-  // For init directive, pass the parsed arguments
-  if (DKind == GTaPDirectiveKind::GTaPD_init) {
-    return getActions().GTaP().ActOnGTaPInitDirective(StartLoc, EndLoc, RuntimeType, FunctionName);
-  }
   if (DKind == GTaPDirectiveKind::GTaPD_task) {
     return getActions().GTaP().ActOnGTaPTaskDirective(AStmt, StartLoc, EndLoc, QueueExpr);
   }

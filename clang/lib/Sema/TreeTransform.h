@@ -1686,13 +1686,6 @@ public:
     return getSema().GTaP().ActOnGTaPTaskwaitDirective(StartLoc, EndLoc, QueueExpr);
   }
 
-  StmtResult RebuildGTaPInitDirective(SourceLocation StartLoc,
-                                      SourceLocation EndLoc,
-                                      StringRef RuntimeType,
-                                      StringRef FunctionName) {
-    return getSema().GTaP().ActOnGTaPInitDirective(StartLoc, EndLoc, RuntimeType, FunctionName);
-  }
-
   StmtResult RebuildGTaPEntryDirective(SourceLocation StartLoc,
                                        SourceLocation EndLoc, Stmt *AStmt) {
     return getSema().GTaP().ActOnGTaPEntryDirective(StartLoc, EndLoc, AStmt);
@@ -9921,13 +9914,6 @@ TreeTransform<Derived>::TransformGTaPTaskwaitDirective(
   ExprResult TK = K ? TransformExpr(K) : ExprResult();
   return getDerived().RebuildGTaPTaskwaitDirective(D->getBeginLoc(), D->getEndLoc(), 
                                                    TK.isUsable() ? TK.get() : nullptr);
-}
-
-template <typename Derived>
-StmtResult
-TreeTransform<Derived>::TransformGTaPInitDirective(GTaPInitDirective *D) {
-  return getDerived().RebuildGTaPInitDirective(D->getBeginLoc(), D->getEndLoc(),
-                                               D->getRuntimeType(), D->getFunctionName());
 }
 
 template <typename Derived>

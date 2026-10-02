@@ -2663,11 +2663,6 @@ void ASTStmtWriter::VisitGTaPTaskwaitDirective(GTaPTaskwaitDirective *D) {
   Code = serialization::STMT_GTAP_TASKWAIT_DIRECTIVE;
 }
 
-void ASTStmtWriter::VisitGTaPInitDirective(GTaPInitDirective *D) {
-  VisitStmt(D);
-  Code = serialization::STMT_GTAP_INIT_DIRECTIVE;
-}
-
 void ASTStmtWriter::VisitGTaPEntryDirective(GTaPEntryDirective *D) {
   VisitStmt(D);
   Code = serialization::STMT_GTAP_ENTRY_DIRECTIVE;

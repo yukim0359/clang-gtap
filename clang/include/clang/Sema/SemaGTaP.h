@@ -59,18 +59,6 @@ public:
                                         SourceLocation EndLoc,
                                         Expr *QueueExpr);
 
-  /// Called on well-formed '#pragma gtap init'.
-  ///
-  /// \param StartLoc Starting location of the directive.
-  /// \param EndLoc Ending location of the directive.
-  /// \param RT Runtime type identifier (e.g., "thread", "block").
-  /// \param FN Function name identifier (e.g., "fib").
-  ///
-  StmtResult ActOnGTaPInitDirective(SourceLocation StartLoc,
-                                    SourceLocation EndLoc,
-                                    StringRef RT,
-                                    StringRef FN);
-
   /// Called on well-formed '#pragma gtap entry'.
   ///
   /// \param StartLoc Starting location of the directive.

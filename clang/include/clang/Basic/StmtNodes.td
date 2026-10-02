@@ -308,7 +308,6 @@ def OMPErrorDirective : StmtNode<OMPExecutableDirective>;
 def GTaPExecutableDirective : StmtNode<Stmt, 1>;
 def GTaPTaskDirective : StmtNode<GTaPExecutableDirective>;
 def GTaPTaskwaitDirective : StmtNode<GTaPExecutableDirective>;
-def GTaPInitDirective : StmtNode<GTaPExecutableDirective>;
 def GTaPEntryDirective : StmtNode<GTaPExecutableDirective>;
 
 // OpenACC Constructs.

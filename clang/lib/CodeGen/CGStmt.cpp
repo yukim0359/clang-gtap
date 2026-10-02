@@ -464,7 +464,6 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   // so they should not reach CodeGen. If they do, it's an error.
   case Stmt::GTaPTaskDirectiveClass:
   case Stmt::GTaPTaskwaitDirectiveClass:
-  case Stmt::GTaPInitDirectiveClass:
   case Stmt::GTaPEntryDirectiveClass:
     llvm_unreachable("GTaP directives should be transformed by Sema before reaching CodeGen");
   case Stmt::OpenACCComputeConstructClass:

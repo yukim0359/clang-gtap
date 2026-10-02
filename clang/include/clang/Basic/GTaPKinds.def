@@ -12,7 +12,6 @@
 // Directives
 GTAP_DIRECTIVE(task)
 GTAP_DIRECTIVE(taskwait)
-GTAP_DIRECTIVE(init)
 GTAP_DIRECTIVE(entry)
 GTAP_DIRECTIVE(function)
 

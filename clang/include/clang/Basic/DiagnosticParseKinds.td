@@ -1503,14 +1503,6 @@ def err_gtap_unknown_directive : Error<
   "expected a GTaP directive">;
 def err_gtap_unexpected_directive : Error<
   "unexpected GTaP directive %select{|'#pragma gtap %1'}0">;
-def err_gtap_init_function_not_found : Error<
-  "function '%0' specified in '#pragma gtap init' not found">;
-def err_gtap_init_function_not_registered : Error<
-  "function '%0' specified in '#pragma gtap init' was not registered. "
-  "Ensure '#pragma gtap function' is applied to function '%0' before '#pragma gtap init'">;
-def err_gtap_entry_function_not_initialized : Error<
-  "function '%0' called in '#pragma gtap entry' was not initialized. "
-  "Ensure '#pragma gtap init' with function '%0' is called before '#pragma gtap entry'">;
 def err_omp_expected_punc : Error<
   "expected ',' or ')' in '%0' %select{clause|directive}1">;
 def warn_clause_expected_string : Warning<

@@ -3317,8 +3317,6 @@ DEF_TRAVERSE_STMT(GTaPTaskDirective,
                   { TRY_TO(TraverseGTaPExecutableDirective(S)); })
 DEF_TRAVERSE_STMT(GTaPTaskwaitDirective,
                   { TRY_TO(TraverseGTaPExecutableDirective(S)); })
-DEF_TRAVERSE_STMT(GTaPInitDirective,
-                  { TRY_TO(TraverseGTaPExecutableDirective(S)); })
 DEF_TRAVERSE_STMT(GTaPEntryDirective,
                   { TRY_TO(TraverseGTaPExecutableDirective(S)); })
 

@@ -1348,10 +1348,6 @@ StmtResult SemaGTaP::ActOnGTaPExecutableDirective(GTaPDirectiveKind DKind,
     return ActOnGTaPTaskDirective(AStmt, StartLoc, EndLoc, QueueExpr);
   case GTaPDirectiveKind::GTaPD_taskwait:
     return ActOnGTaPTaskwaitDirective(StartLoc, EndLoc, QueueExpr);
-  case GTaPDirectiveKind::GTaPD_init:
-    // init directive is handled separately in ParseGTaPExecutableDirective
-    // because it requires arguments (runtime type and function name)
-    llvm_unreachable("init directive should not reach ActOnGTaPExecutableDirective");
   case GTaPDirectiveKind::GTaPD_entry:
     return ActOnGTaPEntryDirective(StartLoc, EndLoc, AStmt);
   case GTaPDirectiveKind::GTaPD_function:
@@ -1484,32 +1480,6 @@ FunctionDecl* SemaGTaP::getOrCreateStateMachineFunction(FunctionDecl *UserFD,
   return (TI.StateMachineFD = StateMachineFD);
 }
 
-StmtResult SemaGTaP::ActOnGTaPInitDirective(SourceLocation StartLoc,
-                                          SourceLocation EndLoc,
-                                          StringRef RT, StringRef FN) {
-  ASTContext &Ctx = getASTContext();
-
-  FunctionDecl *InitFn = requireRuntimeFunction(SemaRef, "__gtap_init_task_runtime", StartLoc);
-  if (!InitFn)
-    return StmtError();
-
-  // __gtap_init_task_runtime();
-  ExprResult Callee = SemaRef.BuildDeclRefExpr(
-    InitFn, InitFn->getType(), VK_LValue, StartLoc);
-
-  ExprResult CallResult = SemaRef.BuildCallExpr(
-    /*Scope=*/nullptr,
-    Callee.get(),
-    StartLoc,
-    MultiExprArg(),
-    EndLoc);
-
-  if (CallResult.isInvalid())
-    return StmtResult(new (Ctx) NullStmt(StartLoc));
-
-  return SemaRef.ActOnExprStmt(CallResult.get());
-}
-
 StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
                                            SourceLocation EndLoc,
                                            Stmt *AStmt) {
@@ -1566,12 +1536,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Get task record
   llvm::DenseMap<const ValueDecl *, FieldDecl *> FieldMap;
   RecordDecl *TaskRecord = createTaskDataRecord(SemaRef, CalleeDecl, TaskInfo, FieldMap);
-  if (!TaskRecord) {
-    if (TaskInfo.TaskRecordInvalid)
-      return StmtError();
-    SemaRef.Diag(StartLoc, diag::err_gtap_entry_function_not_initialized) << FuncName;
+  if (!TaskRecord)
     return StmtError();
-  }
   
   QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(TaskRecord));
   if (SemaRef.RequireCompleteType(StartLoc, TaskRecordTy, diag::err_typecheck_incomplete_tag)) {

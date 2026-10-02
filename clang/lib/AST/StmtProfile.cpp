@@ -1118,10 +1118,6 @@ void StmtProfiler::VisitGTaPTaskwaitDirective(const GTaPTaskwaitDirective *S) {
   VisitGTaPExecutableDirective(S);
 }
 
-void StmtProfiler::VisitGTaPInitDirective(const GTaPInitDirective *S) {
-  VisitGTaPExecutableDirective(S);
-}
-
 void StmtProfiler::VisitGTaPEntryDirective(const GTaPEntryDirective *S) {
   VisitGTaPExecutableDirective(S);
 }
