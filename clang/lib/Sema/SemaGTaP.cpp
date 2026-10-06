@@ -217,10 +217,13 @@ static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
 }
 
 // The source declaration keeps its const. Task-data storage is written after
-// allocation, so drop only a top-level const. Pointee const and array-element
-// const stay with the value.
+// allocation, so drop a top-level const, including one hidden by a typedef or
+// decltype. Array-element const and pointee const stay with the value.
 static QualType taskDataStorageType(ASTContext &Ctx, QualType Ty) {
-  SplitQualType Split = Ty.split();
+  if (Ty->isArrayType())
+    return Ty;
+
+  SplitQualType Split = Ty.getSplitUnqualifiedType();
   Split.Quals.removeConst();
   return Ctx.getQualifiedType(Split);
 }

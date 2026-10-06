@@ -5,11 +5,14 @@
 // CHECK: FieldDecl {{.*}} input 'const int *'
 // CHECK: FieldDecl {{.*}} __cap_saved 'int'
 // CHECK: FieldDecl {{.*}} __cap_pinned 'const int *'
+// CHECK: FieldDecl {{.*}} __cap_aliased 'int'
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_keep_const
 // CHECK: BinaryOperator {{.*}} 'int' lvalue '='
 // CHECK-NEXT: MemberExpr {{.*}}__cap_saved
 // CHECK: BinaryOperator {{.*}} 'const int *' lvalue '='
 // CHECK-NEXT: MemberExpr {{.*}}__cap_pinned
+// CHECK: BinaryOperator {{.*}} 'int' lvalue '='
+// CHECK-NEXT: MemberExpr {{.*}}__cap_aliased
 
 #define __device__ __attribute__((device))
 
@@ -23,10 +26,13 @@ __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
 __device__ bool __gtap_set_state_for_join(int, int, int, int);
 
+using CI = const int;
+
 #pragma gtap function
 __device__ int keep_const(const int *input) {
   const int saved = *input;
   const int *const pinned = input;
+  CI aliased = *input;
 #pragma gtap taskwait
-  return saved + *pinned;
+  return saved + *pinned + aliased;
 }
