@@ -216,6 +216,18 @@ static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
   return ThreadIdxX.isInvalid() ? nullptr : ThreadIdxX.get();
 }
 
+// The source declaration keeps its const. Task-data storage is written after
+// allocation, so drop a top-level const, including one hidden by a typedef or
+// decltype. Array-element const and pointee const stay with the value.
+static QualType taskDataStorageType(ASTContext &Ctx, QualType Ty) {
+  if (Ty->isArrayType())
+    return Ty;
+
+  SplitQualType Split = Ty.getSplitUnqualifiedType();
+  Split.Quals.removeConst();
+  return Ctx.getQualifiedType(Split);
+}
+
 static bool checkTaskDataFieldTypeOrDiag(Sema &S, SourceLocation Loc,
                                          StringRef FieldName, QualType FieldTy) {
   if (FieldTy.isNull())
@@ -351,17 +363,11 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
-      QualType FieldTy = Param->getType();
+      QualType FieldTy = taskDataStorageType(Ctx, Param->getType());
       const bool IsUniformBlockParameter =
           IsBlockMode &&
           CurrentParamIndex < TaskInfo.ParameterIsUniform.size() &&
           TaskInfo.ParameterIsUniform[CurrentParamIndex];
-      // Task-data fields are initialized after allocation, so their storage
-      // type must be assignable.  Remove only a parameter's top-level const;
-      // nested qualifiers such as the pointee const in `const T *` remain.
-      SplitQualType FieldSplit = FieldTy.split();
-      FieldSplit.Quals.removeConst();
-      FieldTy = Ctx.getQualifiedType(FieldSplit);
       // A block task is resumed collectively, so an ordinary CUDA function
       // parameter must retain one value per thread.  The argument expression
       // is evaluated once by the spawning thread; state 0 of the child then
@@ -390,9 +396,9 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
               : ("__cap_anon_" + std::to_string(CaptureIndex));
       ++CaptureIndex;
       FieldName = makeUniqueFieldName(FieldName);
-      QualType FieldTy = VD->getType();
+      QualType FieldTy = taskDataStorageType(Ctx, VD->getType());
       if (!checkTaskDataFieldTypeOrDiag(S, VD->getLocation(), FieldName,
-                                        FieldTy)) {
+                                        VD->getType())) {
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
@@ -591,6 +597,17 @@ public:
   
     SmallVector<Stmt*, 4> Stmts;          // Return statements (DeclStmt + Assign)
     SmallVector<Decl*, 4> KeepDecls;      // For non-captured VarDecls to keep
+    bool EmittedCaptureInit = false;
+    
+    // Keep each non-captured declaration where it appeared. Flush the group
+    // before the next captured initializer so that initializer can see it.
+    auto flushKeptDecls = [&]() {
+      if (KeepDecls.empty())
+        return;
+      DeclGroupRef DG = DeclGroupRef::Create(Ctx, KeepDecls.data(), KeepDecls.size());
+      Stmts.push_back(new (Ctx) DeclStmt(DG, DS->getBeginLoc(), DS->getEndLoc()));
+      KeepDecls.clear();
+    };
   
     for (Decl *D : DS->decls()) {
       auto *VD = dyn_cast<VarDecl>(D);
@@ -621,6 +638,7 @@ public:
           if (NewInitExpr != VD->getInit())
             VD->setInit(NewInitExpr);
           KeepDecls.push_back(VD);
+          flushKeptDecls();
 
           ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
           if (LHSER.isInvalid()) return StmtError();
@@ -636,9 +654,11 @@ public:
           Expr *CopyArgs[] = {To, From, Size};
           Stmts.push_back(SemaRef.BuildBuiltinCallExpr(
               SourceLocation(), Builtin::BI__builtin_memcpy, CopyArgs));
+          EmittedCaptureInit = true;
           continue;
         }
 
+        flushKeptDecls();
         ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
         if (LHSER.isInvalid()) return StmtError();
         Expr *LHS = LHSER.get();
@@ -646,6 +666,7 @@ public:
             /*Scope=*/nullptr, SourceLocation(), BO_Assign, LHS, NewInitExpr);
         if (Assign.isInvalid()) return StmtError();
         Stmts.push_back(Assign.get());
+        EmittedCaptureInit = true;
       } else {
         if (VD->hasInit() && NewInitExpr && NewInitExpr != VD->getInit()) {
           VD->setInit(NewInitExpr);
@@ -654,13 +675,11 @@ public:
       }
     }
   
-    // if there is at least one captured, build a CompoundStmt (DeclStmt + Assign)
-    if (!Stmts.empty()) {
-      if (!KeepDecls.empty()) {
-        DeclGroupRef DG = DeclGroupRef::Create(Ctx, KeepDecls.data(), KeepDecls.size());
-        Stmt *NewDeclStmt = new (Ctx) DeclStmt(DG, DS->getBeginLoc(), DS->getEndLoc());
-        Stmts.insert(Stmts.begin(), NewDeclStmt);
-      }
+    flushKeptDecls();
+
+    // A captured initializer splits the declaration group, so the pieces are
+    // one compound statement in source order.
+    if (EmittedCaptureInit) {
       return getDerived().RebuildCompoundStmt(
           SourceLocation(), Stmts, SourceLocation(), /*IsStmtExpr=*/false);
     }
@@ -1558,7 +1577,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
   VarDecl *EntryResultBufferVar = nullptr;
   DeclStmt *EntryResultBufferDecl = nullptr;
-  if (IsBlockMode && ResultDest && TaskInfo.ResultDstField) {
+  if (IsBlockMode && TaskInfo.ResultDstField) {
     noteEntryResultSize(
         Ctx.getTypeSizeInChars(TaskInfo.ReturnType).getQuantity());
     FunctionDecl *GetEntryResultFn = requireRuntimeFunction(
