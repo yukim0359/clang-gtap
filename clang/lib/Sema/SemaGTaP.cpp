@@ -216,6 +216,15 @@ static Expr *buildThreadIdxXExpr(Sema &S, SourceLocation Loc) {
   return ThreadIdxX.isInvalid() ? nullptr : ThreadIdxX.get();
 }
 
+// The source declaration keeps its const. Task-data storage is written after
+// allocation, so drop only a top-level const. Pointee const and array-element
+// const stay with the value.
+static QualType taskDataStorageType(ASTContext &Ctx, QualType Ty) {
+  SplitQualType Split = Ty.split();
+  Split.Quals.removeConst();
+  return Ctx.getQualifiedType(Split);
+}
+
 static bool checkTaskDataFieldTypeOrDiag(Sema &S, SourceLocation Loc,
                                          StringRef FieldName, QualType FieldTy) {
   if (FieldTy.isNull())
@@ -351,17 +360,11 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
-      QualType FieldTy = Param->getType();
+      QualType FieldTy = taskDataStorageType(Ctx, Param->getType());
       const bool IsUniformBlockParameter =
           IsBlockMode &&
           CurrentParamIndex < TaskInfo.ParameterIsUniform.size() &&
           TaskInfo.ParameterIsUniform[CurrentParamIndex];
-      // Task-data fields are initialized after allocation, so their storage
-      // type must be assignable.  Remove only a parameter's top-level const;
-      // nested qualifiers such as the pointee const in `const T *` remain.
-      SplitQualType FieldSplit = FieldTy.split();
-      FieldSplit.Quals.removeConst();
-      FieldTy = Ctx.getQualifiedType(FieldSplit);
       // A block task is resumed collectively, so an ordinary CUDA function
       // parameter must retain one value per thread.  The argument expression
       // is evaluated once by the spawning thread; state 0 of the child then
@@ -390,9 +393,9 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
               : ("__cap_anon_" + std::to_string(CaptureIndex));
       ++CaptureIndex;
       FieldName = makeUniqueFieldName(FieldName);
-      QualType FieldTy = VD->getType();
+      QualType FieldTy = taskDataStorageType(Ctx, VD->getType());
       if (!checkTaskDataFieldTypeOrDiag(S, VD->getLocation(), FieldName,
-                                        FieldTy)) {
+                                        VD->getType())) {
         TaskInfo.TaskRecordInvalid = true;
         return nullptr;
       }
