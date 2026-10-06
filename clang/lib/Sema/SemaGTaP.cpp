@@ -1558,7 +1558,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
   VarDecl *EntryResultBufferVar = nullptr;
   DeclStmt *EntryResultBufferDecl = nullptr;
-  if (IsBlockMode && ResultDest && TaskInfo.ResultDstField) {
+  if (IsBlockMode && TaskInfo.ResultDstField) {
     noteEntryResultSize(
         Ctx.getTypeSizeInChars(TaskInfo.ReturnType).getQuantity());
     FunctionDecl *GetEntryResultFn = requireRuntimeFunction(
