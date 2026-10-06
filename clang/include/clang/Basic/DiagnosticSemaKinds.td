@@ -185,6 +185,8 @@ def err_gtap_taskwait_in_switch : Error<
   "#pragma gtap taskwait inside a switch statement is not supported">;
 def err_gtap_entry_invalid_statement : Error<
   "#pragma gtap entry must be followed by a direct call to a GTaP task function or an assignment from such a call">;
+def err_gtap_queue_argument_not_integer : Error<
+  "queue argument of type %0 is not an integer">;
 
 // Semantic analysis of constant literals.
 def ext_predef_outside_function : Warning<

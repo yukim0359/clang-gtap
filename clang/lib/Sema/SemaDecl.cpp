@@ -16313,6 +16313,12 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
         if (FD->hasAttr<GTaPFunctionAttr>()) {
           if (auto *CS = dyn_cast<CompoundStmt>(Body)) {
             StmtResult SMBody = GTaP().TransformTaskFunctionBody(FD, CS);
+            // TODO: This return skips PopDeclContext and PopFunctionScopeInfo
+            // below, so a rejected #pragma gtap task leaves the function scope
+            // open. A declaration later in the translation unit is nested in
+            // it, and redeclaring that name can crash in
+            // IdentifierResolver::isDeclInScope. The translation unit is
+            // already ill-formed.
             if (SMBody.isInvalid()) return nullptr;
             Body = SMBody.get();
           } else {

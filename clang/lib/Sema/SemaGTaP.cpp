@@ -905,17 +905,13 @@ public:
         InTaskDirective = OldInTaskDirective;
         return StmtError();
       }
-      // Build queue_idx argument
+      // The queue index was type-checked and converted to int when the
+      // directive was parsed. Rewrite names, then pass that expression through.
       Expr *QueueArg = nullptr;
       if (Expr *QE = Dir->getQueueExpr()) {
         ExprResult TQ = getDerived().TransformExpr(QE);
         if (TQ.isInvalid()) return StmtError();
-        Expr *E = TQ.get();
-        if (!E->getType()->isIntegerType()) {
-          // diag and fallback to 0
-        }
-        QueueArg = ImplicitCastExpr::Create(
-            Ctx, IntTy, CK_IntegralCast, toRValue(E), nullptr, VK_PRValue, FPOptionsOverride());
+        QueueArg = TQ.get();
       }
       if (!QueueArg) {
         QueueArg = IntegerLiteral::Create(
@@ -1382,6 +1378,21 @@ static Expr *defaultQueueExpr(ASTContext &Ctx, SourceLocation Loc) {
                                 Ctx.IntTy, Loc);
 }
 
+// Accept an integer queue index and convert it to int. Generation then uses
+// that expression and does not choose a cast of its own.
+static ExprResult prepareGTaPQueueArgument(Sema &S, Expr *QueueExpr,
+                                           SourceLocation Loc) {
+  if (!QueueExpr)
+    return defaultQueueExpr(S.Context, Loc);
+  if (!QueueExpr->getType()->isIntegerType()) {
+    S.Diag(QueueExpr->getExprLoc(), diag::err_gtap_queue_argument_not_integer)
+        << QueueExpr->getType();
+    return ExprError();
+  }
+  return S.PerformImplicitConversion(QueueExpr, S.Context.IntTy,
+                                     AssignmentAction::Passing);
+}
+
 static bool diagnoseNestedGTaPTaskFunctionCalls(Sema &S, Stmt *Root,
                                                 const CallExpr *AllowedCall) {
   class NestedCallVisitor
@@ -1430,13 +1441,15 @@ StmtResult SemaGTaP::ActOnGTaPTaskDirective(Stmt *AStmt, SourceLocation StartLoc
   if (!AStmt)
     return StmtError();
 
-  ASTContext &Ctx = getASTContext();
-  Expr *Q = QueueExpr ? QueueExpr : defaultQueueExpr(Ctx, StartLoc);
+  ExprResult Q = prepareGTaPQueueArgument(SemaRef, QueueExpr, StartLoc);
+  if (Q.isInvalid())
+    return StmtError();
   CallExpr *SpawnCall = getGTaPAssociatedCall(AStmt);
   if (diagnoseNestedGTaPTaskFunctionCalls(SemaRef, AStmt, SpawnCall))
     return StmtError();
 
-  return GTaPTaskDirective::Create(getASTContext(), StartLoc, EndLoc, AStmt, Q);
+  return GTaPTaskDirective::Create(getASTContext(), StartLoc, EndLoc, AStmt,
+                                   Q.get());
 }
 
 StmtResult SemaGTaP::ActOnGTaPTaskwaitDirective(SourceLocation StartLoc,
@@ -1448,10 +1461,12 @@ StmtResult SemaGTaP::ActOnGTaPTaskwaitDirective(SourceLocation StartLoc,
     return StmtError();
   }
 
-  ASTContext &Ctx = getASTContext();
-  Expr *Q = QueueExpr ? QueueExpr : defaultQueueExpr(Ctx, StartLoc);
+  ExprResult Q = prepareGTaPQueueArgument(SemaRef, QueueExpr, StartLoc);
+  if (Q.isInvalid())
+    return StmtError();
 
-  return GTaPTaskwaitDirective::Create(getASTContext(), StartLoc, EndLoc, Q);
+  return GTaPTaskwaitDirective::Create(getASTContext(), StartLoc, EndLoc,
+                                       Q.get());
 }
 
 FunctionDecl* SemaGTaP::getOrCreateStateMachineFunction(FunctionDecl *UserFD,
@@ -2351,13 +2366,11 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     if (!SetStateForJoinFn) return nullptr;
 
     auto buildWaitQueueArg = [&](Expr *QE) -> Expr* {
-      if (!QE) return IntegerLiteral::Create(Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), 0), Ctx.IntTy, SourceLocation());
-      Expr *E = asRValue(QE);
-      if (!Ctx.hasSameType(E->getType(), IntTy)) {
-        E = ImplicitCastExpr::Create(Ctx, IntTy, CK_IntegralCast, E,
-                                     nullptr, VK_PRValue, FPOptionsOverride());
-      }
-      return E;
+      if (!QE)
+        return IntegerLiteral::Create(
+            Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), 0), Ctx.IntTy,
+            SourceLocation());
+      return asRValue(QE);
     };
     
     // args: (tid, child_count_or_ctx, next_state, queue)

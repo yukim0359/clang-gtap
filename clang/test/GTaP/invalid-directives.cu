@@ -16,6 +16,9 @@ __device__ bool __gtap_set_state_for_join(int, int, int, int);
 __device__ void ordinary();
 
 #pragma gtap function
+__device__ void queue_leaf() {}
+
+#pragma gtap function
 __device__ void invalid_ordinary_call() {
   // expected-error@+1 {{#pragma gtap task must be followed by a direct call to a GTaP task function or an assignment from such a call}}
 #pragma gtap task
@@ -27,6 +30,15 @@ __device__ void invalid_non_call(int *x) {
   // expected-error@+1 {{#pragma gtap task must be followed by a direct call to a GTaP task function or an assignment from such a call}}
 #pragma gtap task
   ++*x;
+}
+
+#pragma gtap function
+__device__ void invalid_queue(int *p, float f) {
+  // expected-error@+1 {{queue argument of type 'int *' is not an integer}}
+#pragma gtap task queue(p)
+  queue_leaf();
+  // expected-error@+1 {{queue argument of type 'float' is not an integer}}
+#pragma gtap taskwait queue(f)
 }
 
 #pragma gtap function
