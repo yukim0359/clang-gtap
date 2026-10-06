@@ -591,6 +591,17 @@ public:
   
     SmallVector<Stmt*, 4> Stmts;          // Return statements (DeclStmt + Assign)
     SmallVector<Decl*, 4> KeepDecls;      // For non-captured VarDecls to keep
+    bool EmittedCaptureInit = false;
+    
+    // Keep each non-captured declaration where it appeared. Flush the group
+    // before the next captured initializer so that initializer can see it.
+    auto flushKeptDecls = [&]() {
+      if (KeepDecls.empty())
+        return;
+      DeclGroupRef DG = DeclGroupRef::Create(Ctx, KeepDecls.data(), KeepDecls.size());
+      Stmts.push_back(new (Ctx) DeclStmt(DG, DS->getBeginLoc(), DS->getEndLoc()));
+      KeepDecls.clear();
+    };
   
     for (Decl *D : DS->decls()) {
       auto *VD = dyn_cast<VarDecl>(D);
@@ -621,6 +632,7 @@ public:
           if (NewInitExpr != VD->getInit())
             VD->setInit(NewInitExpr);
           KeepDecls.push_back(VD);
+          flushKeptDecls();
 
           ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
           if (LHSER.isInvalid()) return StmtError();
@@ -636,9 +648,11 @@ public:
           Expr *CopyArgs[] = {To, From, Size};
           Stmts.push_back(SemaRef.BuildBuiltinCallExpr(
               SourceLocation(), Builtin::BI__builtin_memcpy, CopyArgs));
+          EmittedCaptureInit = true;
           continue;
         }
 
+        flushKeptDecls();
         ExprResult LHSER = buildCapturedFieldAccess(Field, SourceLocation());
         if (LHSER.isInvalid()) return StmtError();
         Expr *LHS = LHSER.get();
@@ -646,6 +660,7 @@ public:
             /*Scope=*/nullptr, SourceLocation(), BO_Assign, LHS, NewInitExpr);
         if (Assign.isInvalid()) return StmtError();
         Stmts.push_back(Assign.get());
+        EmittedCaptureInit = true;
       } else {
         if (VD->hasInit() && NewInitExpr && NewInitExpr != VD->getInit()) {
           VD->setInit(NewInitExpr);
@@ -654,13 +669,11 @@ public:
       }
     }
   
-    // if there is at least one captured, build a CompoundStmt (DeclStmt + Assign)
-    if (!Stmts.empty()) {
-      if (!KeepDecls.empty()) {
-        DeclGroupRef DG = DeclGroupRef::Create(Ctx, KeepDecls.data(), KeepDecls.size());
-        Stmt *NewDeclStmt = new (Ctx) DeclStmt(DG, DS->getBeginLoc(), DS->getEndLoc());
-        Stmts.insert(Stmts.begin(), NewDeclStmt);
-      }
+    flushKeptDecls();
+
+    // A captured initializer splits the declaration group, so the pieces are
+    // one compound statement in source order.
+    if (EmittedCaptureInit) {
       return getDerived().RebuildCompoundStmt(
           SourceLocation(), Stmts, SourceLocation(), /*IsStmtExpr=*/false);
     }
