@@ -1,7 +1,7 @@
 // RUN: %clang_cc1 -triple nvptx64-nvidia-cuda -fcuda-is-device -x cuda \
 // RUN:   -std=c++17 -ast-dump %s | FileCheck %s
 // A discarded block entry still publishes one result per thread.
-// CHECK: VarDecl {{.*}} __gtap_auto_entry_result_size 'const unsigned long' extern cinit
+// CHECK: VarDecl {{.*}} __gtap_entry_result_size 'const unsigned long' extern cinit
 // CHECK-NEXT: IntegerLiteral {{.*}} 'unsigned long' 4
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_get_entry_result_data'
 // CHECK: MemberExpr {{.*}}__gtap_result_dst

@@ -174,10 +174,9 @@ private:
 
   uint64_t AutoTaskDataSize = 0;
   uint64_t AutoTaskDataAlign = 1;
-  VarDecl *AutoTaskDataSizeDecl = nullptr;
-  VarDecl *AutoTaskDataAlignDecl = nullptr;
+  VarDecl *AutoTaskDataStrideDecl = nullptr;
   std::vector<std::pair<uint64_t, uint64_t>> AutoBlockTaskDataLayouts;
-  VarDecl *AutoBlockTaskDataSizesDecl = nullptr;
+  VarDecl *AutoBlockTaskDataStridesDecl = nullptr;
   uint64_t AutoEntryResultSize = 1;
   VarDecl *AutoEntryResultSizeDecl = nullptr;
 };

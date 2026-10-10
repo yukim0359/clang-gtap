@@ -8,8 +8,7 @@
 // CHECK: RecordDecl {{.*}} struct fib_block_task_lane_storage definition
 // CHECK: FieldDecl {{.*}} __cap_x 'int[32]'
 // CHECK: FieldDecl {{.*}} __cap_y 'int[32]'
-// CHECK: VarDecl {{.*}} __gtap_auto_task_data_align 'const unsigned long' extern cinit
-// CHECK: VarDecl {{.*}} __gtap_auto_block_task_data_sizes 'const unsigned long[33]' extern cinit
+// CHECK: VarDecl {{.*}} __gtap_block_task_data_strides 'const unsigned long[33]' extern cinit
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_fib_block
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join_block'
 
