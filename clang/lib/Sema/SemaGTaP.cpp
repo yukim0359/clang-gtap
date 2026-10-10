@@ -449,9 +449,12 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
     QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(RD));
     if (!IsBlockMode) {
       S.GTaP().noteTaskRecordSize(
-          Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity());
+          Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity(),
+          Ctx.getTypeAlignInChars(TaskRecordTy).getQuantity());
     } else {
       uint64_t FixedBytes = Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity();
+      uint64_t RecordAlign =
+          Ctx.getTypeAlignInChars(TaskRecordTy).getQuantity();
       uint64_t LaneStorageBytes = 0;
       uint64_t LaneStorageOffset = FixedBytes;
       if (LaneStorageRD && !LaneStorageRD->field_empty()) {
@@ -464,11 +467,13 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
             LaneStorageAlign;
         LaneStorageBytes =
             Ctx.getTypeSizeInChars(LaneStorageTy).getQuantity();
+        RecordAlign = std::max(RecordAlign, LaneStorageAlign);
       }
       TaskInfo.TaskLaneStorageOffset = LaneStorageOffset;
       TaskInfo.TaskLaneStorageSize = LaneStorageBytes;
       S.GTaP().noteBlockTaskRecordLayout(LaneStorageOffset,
-                                         LaneStorageBytes);
+                                         LaneStorageBytes,
+                                         RecordAlign);
       S.GTaP().noteEntryResultSize(1);
     }
 
@@ -1203,50 +1208,67 @@ GTaPTaskFunctionInfo &SemaGTaP::getCachedTaskInfo(FunctionDecl *FD) {
 
 ASTContext &SemaGTaP::getASTContext() { return SemaRef.getASTContext(); }
 
-void SemaGTaP::noteTaskRecordSize(uint64_t Bytes) {
-  if (Bytes == 0)
-    Bytes = 1;
-  if (Bytes <= AutoTaskDataSize && AutoTaskDataSizeDecl)
-    return;
-
-  AutoTaskDataSize = std::max(AutoTaskDataSize, Bytes);
-
-  ASTContext &Ctx = getASTContext();
-  IdentifierInfo &II = Ctx.Idents.get("__gtap_auto_task_data_size");
+static void setExternSizeConstant(Sema &SemaRef, VarDecl *&Decl, StringRef Name,
+                                  uint64_t Value) {
+  ASTContext &Ctx = SemaRef.getASTContext();
+  IdentifierInfo &II = Ctx.Idents.get(Name);
   QualType SizeTy = Ctx.getSizeType();
   QualType ConstSizeTy = Ctx.getConstType(SizeTy);
   Expr *Init = IntegerLiteral::Create(
-      Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), AutoTaskDataSize), SizeTy,
+      Ctx, llvm::APInt(Ctx.getTypeSize(SizeTy), Value), SizeTy,
       SourceLocation());
 
-  if (!AutoTaskDataSizeDecl) {
+  if (!Decl) {
     if (SemaRef.TUScope) {
       LookupResult LR(SemaRef, &II, SourceLocation(), Sema::LookupOrdinaryName);
       if (SemaRef.LookupName(LR, SemaRef.TUScope)) {
         for (NamedDecl *ND : LR) {
           if (auto *VD = dyn_cast<VarDecl>(ND)) {
-            AutoTaskDataSizeDecl = VD;
+            Decl = VD;
             break;
           }
         }
       }
     }
 
-    if (!AutoTaskDataSizeDecl) {
-      AutoTaskDataSizeDecl = VarDecl::Create(
+    if (!Decl) {
+      Decl = VarDecl::Create(
           Ctx, Ctx.getTranslationUnitDecl(), SourceLocation(),
           SourceLocation(), &II, ConstSizeTy,
           Ctx.getTrivialTypeSourceInfo(ConstSizeTy), SC_Extern);
-      Ctx.getTranslationUnitDecl()->addDecl(AutoTaskDataSizeDecl);
+      Ctx.getTranslationUnitDecl()->addDecl(Decl);
     }
   }
 
-  AutoTaskDataSizeDecl->setInit(Init);
+  Decl->setInit(Init);
+}
+
+void SemaGTaP::noteTaskRecordSize(uint64_t Bytes, uint64_t Align) {
+  if (Bytes == 0)
+    Bytes = 1;
+  if (Align == 0)
+    Align = 1;
+  if (Bytes <= AutoTaskDataSize && Align <= AutoTaskDataAlign &&
+      AutoTaskDataSizeDecl && AutoTaskDataAlignDecl)
+    return;
+
+  AutoTaskDataSize = std::max(AutoTaskDataSize, Bytes);
+  AutoTaskDataAlign = std::max(AutoTaskDataAlign, Align);
+  setExternSizeConstant(SemaRef, AutoTaskDataSizeDecl,
+                        "__gtap_auto_task_data_size", AutoTaskDataSize);
+  setExternSizeConstant(SemaRef, AutoTaskDataAlignDecl,
+                        "__gtap_auto_task_data_align", AutoTaskDataAlign);
 }
 
 void SemaGTaP::noteBlockTaskRecordLayout(uint64_t FixedBytes,
-                                         uint64_t LaneStorageBytes) {
+                                         uint64_t LaneStorageBytes,
+                                         uint64_t Align) {
   FixedBytes = std::max<uint64_t>(FixedBytes, 1);
+  if (Align == 0)
+    Align = 1;
+  AutoTaskDataAlign = std::max(AutoTaskDataAlign, Align);
+  setExternSizeConstant(SemaRef, AutoTaskDataAlignDecl,
+                        "__gtap_auto_task_data_align", AutoTaskDataAlign);
   std::pair<uint64_t, uint64_t> Layout{FixedBytes, LaneStorageBytes};
   if (std::find(AutoBlockTaskDataLayouts.begin(),
                 AutoBlockTaskDataLayouts.end(), Layout) ==
@@ -1336,9 +1358,11 @@ void SemaGTaP::noteEntryResultSize(uint64_t Bytes) {
 }
 
 void SemaGTaP::ActOnEndOfTranslationUnit() {
-  SmallVector<Decl *, 3> MetadataDecls;
+  SmallVector<Decl *, 4> MetadataDecls;
   if (AutoTaskDataSizeDecl && AutoTaskDataSizeDecl->hasInit())
     MetadataDecls.push_back(AutoTaskDataSizeDecl);
+  if (AutoTaskDataAlignDecl && AutoTaskDataAlignDecl->hasInit())
+    MetadataDecls.push_back(AutoTaskDataAlignDecl);
   if (AutoBlockTaskDataSizesDecl && AutoBlockTaskDataSizesDecl->hasInit())
     MetadataDecls.push_back(AutoBlockTaskDataSizesDecl);
   if (AutoEntryResultSizeDecl && AutoEntryResultSizeDecl->hasInit())

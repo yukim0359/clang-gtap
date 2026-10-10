@@ -148,9 +148,10 @@ public:
                                                 QualType TaskCtxPtrTy);
 
   /// Record a generated task-data layout in this translation unit.
-  void noteTaskRecordSize(uint64_t Bytes);
+  void noteTaskRecordSize(uint64_t Bytes, uint64_t Align);
   void noteBlockTaskRecordLayout(uint64_t FixedBytes,
-                                 uint64_t LaneStorageBytes);
+                                 uint64_t LaneStorageBytes,
+                                 uint64_t Align);
   void noteEntryResultSize(uint64_t Bytes);
 
   /// Notify the AST consumer about compiler-generated metadata definitions
@@ -172,7 +173,9 @@ private:
   llvm::DenseMap<const FunctionDecl *, GTaPTaskFunctionInfo> CachedTaskInfos;
 
   uint64_t AutoTaskDataSize = 0;
+  uint64_t AutoTaskDataAlign = 1;
   VarDecl *AutoTaskDataSizeDecl = nullptr;
+  VarDecl *AutoTaskDataAlignDecl = nullptr;
   std::vector<std::pair<uint64_t, uint64_t>> AutoBlockTaskDataLayouts;
   VarDecl *AutoBlockTaskDataSizesDecl = nullptr;
   uint64_t AutoEntryResultSize = 1;
