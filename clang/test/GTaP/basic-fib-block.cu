@@ -10,7 +10,7 @@
 // CHECK: FieldDecl {{.*}} __cap_y 'int[32]'
 // CHECK: VarDecl {{.*}} __gtap_block_task_data_strides 'const unsigned long[33]' extern cinit
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_fib_block
-// CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join_block'
+// CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_prepare_for_join_block'
 
 #define __device__ __attribute__((device))
 #define __GTAP_IS_BLOCK_MODE 1
@@ -25,7 +25,7 @@ using TaskFn = void (*)(void *, int, TaskContext *);
 __device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
-__device__ bool __gtap_set_state_for_join_block(int, TaskContext *, int, int);
+__device__ bool __gtap_prepare_for_join_block(int, TaskContext *, int, int);
 
 #pragma gtap function
 __device__ int fib_block(int n) {

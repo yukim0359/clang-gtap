@@ -22,7 +22,7 @@ using TaskFn = void (*)(void *, int, TaskContext *);
 __device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
-__device__ bool __gtap_set_state_for_join_block(int, TaskContext *, int, int);
+__device__ bool __gtap_prepare_for_join_block(int, TaskContext *, int, int);
 __device__ void *__gtap_get_task_data(int);
 __device__ void *__gtap_get_entry_result_data();
 __device__ void __gtap_push_initial_task(TaskFn, int);

@@ -2366,12 +2366,12 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       SwitchStmt::Create(Ctx, /*Init=*/nullptr, /*Var=*/nullptr, SwitchCond,
                          SourceLocation(), SourceLocation());
 
-  // set_state_for_join call
-  FunctionDecl *SetStateForJoinFn = requireRuntimeFunction(
+  // prepare_for_join call
+  FunctionDecl *PrepareForJoinFn = requireRuntimeFunction(
       SemaRef,
-      IsBlockMode ? "__gtap_set_state_for_join_block" : "__gtap_set_state_for_join",
+      IsBlockMode ? "__gtap_prepare_for_join_block" : "__gtap_prepare_for_join",
       Body->getBeginLoc());
-  if (!SetStateForJoinFn)
+  if (!PrepareForJoinFn)
     return StmtError();
 
   auto buildChildCountRValue = [&]() -> Expr* {
@@ -2386,8 +2386,8 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     return asRValue(LV);
   };
 
-  auto buildSetStateForJoinCall = [&](unsigned NextState, Expr *QueueExpr) -> Stmt* {
-    if (!SetStateForJoinFn) return nullptr;
+  auto buildPrepareForJoinCall = [&](unsigned NextState, Expr *QueueExpr) -> Stmt* {
+    if (!PrepareForJoinFn) return nullptr;
 
     auto buildWaitQueueArg = [&](Expr *QE) -> Expr* {
       if (!QE)
@@ -2408,7 +2408,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     Args.push_back(buildWaitQueueArg(QueueExpr));
   
     ExprResult Callee = SemaRef.BuildDeclRefExpr(
-        SetStateForJoinFn, SetStateForJoinFn->getType(), VK_LValue,
+        PrepareForJoinFn, PrepareForJoinFn->getType(), VK_LValue,
         SourceLocation());
     if (Callee.isInvalid())
       return nullptr;
@@ -2420,17 +2420,17 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
     return Call.get();
   };
 
-  auto appendSetStateForJoin = [&](SmallVectorImpl<Stmt *> &Out,
+  auto appendPrepareForJoin = [&](SmallVectorImpl<Stmt *> &Out,
                                    unsigned NextState, Expr *QueueExpr) {
-    Stmt *SetState = buildSetStateForJoinCall(NextState, QueueExpr);
-    if (!SetState)
+    Stmt *PrepareForJoin = buildPrepareForJoinCall(NextState, QueueExpr);
+    if (!PrepareForJoin)
       return;
 
     Stmt *Return =
         ReturnStmt::Create(Ctx, SourceLocation(), nullptr, nullptr);
-    Expr *Cond = dyn_cast<Expr>(SetState);
+    Expr *Cond = dyn_cast<Expr>(PrepareForJoin);
     if (!Cond) {
-      Out.push_back(SetState);
+      Out.push_back(PrepareForJoin);
       Out.push_back(Return);
       return;
     }
@@ -2599,7 +2599,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
           registerCase(ResumeCase);
 
           // at taskwait position:
-          appendSetStateForJoin(out, resumeState, TW->getQueueExpr());
+          appendPrepareForJoin(out, resumeState, TW->getQueueExpr());
           out.push_back(ResumeCase);
 
           return CompoundStmt::Create(Ctx, out, FPOptionsOverride(),
@@ -2700,10 +2700,10 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
         CaseStmts.push_back(SS);
     }
 
-    // (C) stage end: set_state + return if top-level taskwait exists
+    // (C) stage end: prepare_for_join + return if top-level taskwait exists
     if (St.EndWaitId >= 0) {
       const unsigned nextState = (unsigned)(St.EndWaitId + 1);
-      appendSetStateForJoin(CaseStmts, nextState, St.EndQueueExpr);
+      appendPrepareForJoin(CaseStmts, nextState, St.EndQueueExpr);
     } else {
       // last stage: guarantee finish + return
       appendFinishAndReturnIfNeeded(CaseStmts);

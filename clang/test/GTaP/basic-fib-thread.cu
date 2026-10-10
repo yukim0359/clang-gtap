@@ -9,7 +9,7 @@
 // CHECK: VarDecl {{.*}} __gtap_task_data_stride 'const unsigned long' extern cinit
 // CHECK: FunctionDecl {{.*}} __gtap_state_machine_fib
 // CHECK-COUNT-2: DeclRefExpr {{.*}} Function {{.*}} '__gtap_spawn_task'
-// CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_set_state_for_join'
+// CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_prepare_for_join'
 // CHECK: DeclRefExpr {{.*}} Function {{.*}} '__gtap_finish_task'
 
 #define __device__ __attribute__((device))
@@ -22,7 +22,7 @@ using TaskFn = void (*)(void *, int, TaskContext *);
 __device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
-__device__ bool __gtap_set_state_for_join(int, int, int, int);
+__device__ bool __gtap_prepare_for_join(int, int, int, int);
 
 #pragma gtap function
 __device__ int fib(int n) {
