@@ -18,10 +18,10 @@ using TaskContext = gtap::detail::block::TaskContext;
 struct uint3 { unsigned x, y, z; };
 extern __device__ const uint3 threadIdx;
 using TaskFn = void (*)(void *, int, TaskContext *);
-__device__ void *__gtap_spawn_task(TaskContext *, int, int *, TaskFn, int);
+__device__ void *__gtap_spawn_task(TaskContext *, int, TaskFn);
 __device__ void __gtap_finish_task(int, TaskContext *);
 __device__ int __gtap_get_task_state(int);
-__device__ bool __gtap_prepare_for_join_block(int, TaskContext *, int, int);
+__device__ bool __gtap_prepare_for_join(int, TaskContext *, int);
 
 #pragma gtap function
 __device__ int definition_mutates(const int);

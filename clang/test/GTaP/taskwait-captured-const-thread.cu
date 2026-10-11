@@ -15,6 +15,7 @@
 // CHECK-NEXT: MemberExpr {{.*}}__cap_aliased
 
 #define __device__ __attribute__((device))
+#define __GTAP_IS_THREAD_MODE 1
 
 namespace gtap::detail::thread {
 struct TaskContext {};

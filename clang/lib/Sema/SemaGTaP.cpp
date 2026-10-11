@@ -185,8 +185,8 @@ static QualType lookupTaskContext(Sema &S) {
   DeclContext *TU = S.Context.getTranslationUnitDecl();
   NamespaceDecl *Gtap = lookupNamespace(S, TU, "gtap");
   NamespaceDecl *Detail = lookupNamespace(S, Gtap, "detail");
-  const bool IsBlockMode = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
-  StringRef ModeNS = IsBlockMode ? "block" : "thread";
+  const bool IsThreadMode = isMacroDefined(S, "__GTAP_IS_THREAD_MODE");
+  StringRef ModeNS = IsThreadMode ? "thread" : "block";
   NamespaceDecl *Mode = lookupNamespace(S, Detail, ModeNS);
   return lookupTypeInContext(S, Mode, "TaskContext");
 }
@@ -292,6 +292,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
                                         llvm::DenseMap<const ValueDecl *, FieldDecl *> &FieldMap) {
   ASTContext &Ctx = S.getASTContext();
   FieldMap.clear();
+  const bool IsThreadMode = isMacroDefined(S, "__GTAP_IS_THREAD_MODE");
   const bool IsBlockMode = isMacroDefined(S, "__GTAP_IS_BLOCK_MODE");
 
   if (TaskInfo.TaskRecordInvalid)
@@ -409,7 +410,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
             ArraySizeModifier::Normal, 0);
       }
       FieldDecl *Field = addField(
-          IsBlockMode ? LaneStorageRD : RD, FieldName, FieldTy);
+          IsThreadMode ? RD : LaneStorageRD, FieldName, FieldTy);
       TaskInfo.CapturedFields.push_back(Field);
       FieldMap[dyn_cast<ValueDecl>(VD->getCanonicalDecl())] = Field;
     }
@@ -447,7 +448,7 @@ static RecordDecl *createTaskDataRecord(Sema &S, FunctionDecl *FD,
       Ctx.getTranslationUnitDecl()->addDecl(LaneStorageRD);
     TaskInfo.TaskRecord = RD;
     QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(RD));
-    if (!IsBlockMode) {
+    if (IsThreadMode) {
       S.GTaP().noteTaskRecordSize(
           Ctx.getTypeSizeInChars(TaskRecordTy).getQuantity(),
           Ctx.getTypeAlignInChars(TaskRecordTy).getQuantity());
@@ -880,6 +881,8 @@ public:
       }
       
       QualType TaskRecordTy = Ctx.getTypeDeclType(cast<TypeDecl>(CalleeTaskRecord));
+      const bool IsThreadMode =
+          isMacroDefined(Base::getSema(), "__GTAP_IS_THREAD_MODE");
       const bool IsBlockMode =
           isMacroDefined(Base::getSema(), "__GTAP_IS_BLOCK_MODE");
       QualType VoidTy = Ctx.VoidTy;
@@ -902,8 +905,9 @@ public:
       
       SmallVector<Stmt *, 8> TaskStmts;
       
-      // Step 1: Call __gtap_spawn_task(ctx, self_tid, child_count, func, queue_idx) -> void*
-      // This allocates task ID, sets up TaskHeader, and returns task data pointer
+      // Step 1: Call __gtap_spawn_task. Thread passes child_count and queue_idx.
+      // Block passes ctx, self_tid, and func. This allocates a task ID, sets up
+      // the TaskHeader, and returns the task data pointer.
       FunctionDecl *SpawnTaskFunc = requireRuntimeFunction(
           Base::getSema(), "__gtap_spawn_task", Dir->getBeginLoc());
       if (!SpawnTaskFunc) {
@@ -911,14 +915,16 @@ public:
         return StmtError();
       }
       // The queue index was type-checked and converted to int when the
-      // directive was parsed. Rewrite names, then pass that expression through.
+      // directive was parsed. Thread mode rewrites it and passes it through.
+      // Block mode rewrites it so errors are still reported, then drops it.
       Expr *QueueArg = nullptr;
       if (Expr *QE = Dir->getQueueExpr()) {
         ExprResult TQ = getDerived().TransformExpr(QE);
         if (TQ.isInvalid()) return StmtError();
-        QueueArg = TQ.get();
+        if (IsThreadMode)
+          QueueArg = TQ.get();
       }
-      if (!QueueArg) {
+      if (IsThreadMode && !QueueArg) {
         QueueArg = IntegerLiteral::Create(
             Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, SourceLocation());
       }
@@ -938,14 +944,7 @@ public:
           Ctx, StateMachinePtrTy, CK_FunctionToPointerDecay, StateMachineRef, nullptr, VK_PRValue, FPOptionsOverride());
       
       Expr *ChildCountArg = nullptr;
-      if (IsBlockMode) {
-        ChildCountArg = CStyleCastExpr::Create(
-            Ctx, IntPtrTy, VK_PRValue, CK_NullToPointer,
-            IntegerLiteral::Create(Ctx, llvm::APInt(64, 0), Ctx.IntTy,
-                                   SourceLocation()),
-            nullptr, FPOptionsOverride(), Ctx.getTrivialTypeSourceInfo(IntPtrTy),
-            SourceLocation(), SourceLocation());
-      } else {
+      if (IsThreadMode) {
         Expr *ChildCountRef = DeclRefExpr::Create(
             Ctx, NestedNameSpecifierLoc(), SourceLocation(), ChildCountVar,
             false, SourceLocation(), IntTy, VK_LValue);
@@ -954,16 +953,16 @@ public:
             OK_Ordinary, SourceLocation(), false, FPOptionsOverride());
       }
 
-      // Build __gtap_spawn_task call
-      // Signature: void* __gtap_spawn_task(TaskContext* ctx, int self_tid,
-      //                                    int* child_count, void (*func)(...),
-      //                                    int queue_idx)
+      // Thread: void* __gtap_spawn_task(ctx, self_tid, child_count, func, queue)
+      // Block:  void* __gtap_spawn_task(ctx, self_tid, func)
       SmallVector<Expr *, 5> SpawnArgs;
-      SpawnArgs.push_back(buildParamRValue(CtxParam));      // ctx
-      SpawnArgs.push_back(buildParamRValue(TidParam));      // self_tid
-      SpawnArgs.push_back(ChildCountArg);                    // child_count
-      SpawnArgs.push_back(StateMachinePtr);                  // func
-      SpawnArgs.push_back(QueueArg);                         // queue_idx
+      SpawnArgs.push_back(buildParamRValue(CtxParam));
+      SpawnArgs.push_back(buildParamRValue(TidParam));
+      if (IsThreadMode)
+        SpawnArgs.push_back(ChildCountArg);
+      SpawnArgs.push_back(StateMachinePtr);
+      if (IsThreadMode)
+        SpawnArgs.push_back(QueueArg);
       
       ExprResult SpawnCallee = S.BuildDeclRefExpr(
           SpawnTaskFunc, SpawnTaskFunc->getType(), VK_LValue, SourceLocation());
@@ -1538,9 +1537,24 @@ FunctionDecl* SemaGTaP::getOrCreateStateMachineFunction(FunctionDecl *UserFD,
   return (TI.StateMachineFD = StateMachineFD);
 }
 
+bool SemaGTaP::checkExecutionMode(SourceLocation Loc) {
+  if (ExecutionModeChecked)
+    return ExecutionModeValid;
+  ExecutionModeChecked = true;
+  const bool IsThreadMode = isMacroDefined(SemaRef, "__GTAP_IS_THREAD_MODE");
+  const bool IsBlockMode = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
+  ExecutionModeValid = IsThreadMode != IsBlockMode;
+  if (!ExecutionModeValid)
+    SemaRef.Diag(Loc, diag::err_gtap_execution_mode);
+  return ExecutionModeValid;
+}
+
 StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
                                            SourceLocation EndLoc,
                                            Stmt *AStmt) {
+  if (!checkExecutionMode(StartLoc))
+    return StmtError();
+
   // Transform #pragma gtap entry - entry is only allowed inside __global__ kernel
   if (!AStmt) return StmtError();
   ASTContext &Ctx = getASTContext();
@@ -1612,6 +1626,8 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
   // Create helper function to build task pointer declaration and initialization
   QualType IntTy = Ctx.IntTy;
   QualType TaskPtrTy = Ctx.getPointerType(TaskRecordTy);
+  const bool IsThreadMode =
+      isMacroDefined(SemaRef, "__GTAP_IS_THREAD_MODE");
   const bool IsBlockMode =
       isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
   VarDecl *EntryResultBufferVar = nullptr;
@@ -1874,9 +1890,11 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
       Ctx, FuncPtrVar->getType(), CK_LValueToRValue, FuncPtrRef, nullptr,
       VK_PRValue, FPOptionsOverride()));
   
-  // Argument 2: task_kind = 0
-  PushArgs.push_back(IntegerLiteral::Create(
-      Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc));
+  // Thread mode passes the initial queue index. Block mode has no queue argument.
+  if (IsThreadMode) {
+    PushArgs.push_back(IntegerLiteral::Create(
+        Ctx, llvm::APInt(Ctx.getIntWidth(IntTy), 0), IntTy, StartLoc));
+  }
   
   // Create call
   ExprResult PushCallee = SemaRef.BuildDeclRefExpr(
@@ -1931,7 +1949,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
     if (AssignER.isInvalid())
       return StmtError();
     ResultStmts.push_back(AssignER.get());
-  } else if (ResultDest && !IsBlockMode && TaskInfo.ResultField &&
+  } else if (ResultDest && IsThreadMode && TaskInfo.ResultField &&
              GetTaskDataFn) {
     auto [ResultTaskPtrVar, ResultTaskPtrDeclStmt] = createTaskPtrDecl();
     if (ResultTaskPtrVar && ResultTaskPtrDeclStmt) {
@@ -2107,7 +2125,7 @@ StmtResult SemaGTaP::ActOnGTaPEntryDirective(SourceLocation StartLoc,
             Ctx, NestedNameSpecifierLoc(), SourceLocation(), MasterVar,
             false, StartLoc, Ctx.BoolTy, VK_LValue);
         Expr *MasterCheck2 = nullptr;
-        if (!IsBlockMode) {
+        if (IsThreadMode) {
           MasterCheck2 = ImplicitCastExpr::Create(
               Ctx, Ctx.BoolTy, CK_LValueToRValue, MasterVarRef2, nullptr,
               VK_PRValue, FPOptionsOverride());
@@ -2213,6 +2231,12 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   if (!FD || !Body)
     return StmtError();
 
+  SourceLocation ModeLoc = FD->getLocation();
+  if (const auto *A = FD->getAttr<GTaPFunctionAttr>())
+    ModeLoc = A->getLocation();
+  if (!checkExecutionMode(ModeLoc))
+    return StmtError();
+
   ASTContext &Ctx = getASTContext();
   if (!checkNoTaskwaitInSwitchOrDiag(SemaRef, Body))
     return StmtError();
@@ -2247,7 +2271,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   QualType VoidTy = Ctx.VoidTy;
   QualType VoidPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType IntTy = Ctx.IntTy;
-  const bool IsBlockMode = isMacroDefined(SemaRef, "__GTAP_IS_BLOCK_MODE");
+  const bool IsThreadMode = isMacroDefined(SemaRef, "__GTAP_IS_THREAD_MODE");
 
   QualType TaskCtxPtrTy = Ctx.getPointerType(Ctx.VoidTy);
   QualType TaskCtxTy = lookupTaskContext(SemaRef);
@@ -2287,7 +2311,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   VarDecl *ChildCountVar = nullptr;
   DeclStmt *ChildCountDeclStmt = nullptr;
-  if (!IsBlockMode) {
+  if (IsThreadMode) {
     IdentifierInfo &ChildCountId = Ctx.Idents.get("__gtap_child_count");
     ChildCountVar = VarDecl::Create(
         Ctx, StateMachineFD, SourceLocation(), SourceLocation(), &ChildCountId,
@@ -2368,9 +2392,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
 
   // prepare_for_join call
   FunctionDecl *PrepareForJoinFn = requireRuntimeFunction(
-      SemaRef,
-      IsBlockMode ? "__gtap_prepare_for_join_block" : "__gtap_prepare_for_join",
-      Body->getBeginLoc());
+      SemaRef, "__gtap_prepare_for_join", Body->getBeginLoc());
   if (!PrepareForJoinFn)
     return StmtError();
 
@@ -2397,15 +2419,17 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
       return asRValue(QE);
     };
     
-    // args: (tid, child_count_or_ctx, next_state, queue)
+    // Thread: (tid, child_count, next_state, queue)
+    // Block:  (tid, ctx, next_state)
     SmallVector<Expr*, 4> Args;
     Args.push_back(asRValue(buildParamLValue(TidParam)));
-    Args.push_back(IsBlockMode ? asRValue(buildParamLValue(CtxParam))
-                                  : buildChildCountRValue());
+    Args.push_back(IsThreadMode ? buildChildCountRValue()
+                                : asRValue(buildParamLValue(CtxParam)));
     Args.push_back(IntegerLiteral::Create(
         Ctx, llvm::APInt(Ctx.getIntWidth(Ctx.IntTy), NextState),
         Ctx.IntTy, SourceLocation()));
-    Args.push_back(buildWaitQueueArg(QueueExpr));
+    if (IsThreadMode)
+      Args.push_back(buildWaitQueueArg(QueueExpr));
   
     ExprResult Callee = SemaRef.BuildDeclRefExpr(
         PrepareForJoinFn, PrepareForJoinFn->getType(), VK_LValue,
@@ -2477,7 +2501,7 @@ StmtResult SemaGTaP::TransformTaskFunctionBody(FunctionDecl *FD,
   // state 0: repeating it after a taskwait would overwrite parameter mutations.
   auto buildBlockArgumentBroadcast = [&]() -> Stmt * {
     GTaPTaskFunctionInfo &TI = CachedTaskInfos[CacheKey];
-    if (!IsBlockMode || !TI.SpawningThreadField ||
+    if (IsThreadMode || !TI.SpawningThreadField ||
         TI.ParameterFields.empty())
       return nullptr;
 

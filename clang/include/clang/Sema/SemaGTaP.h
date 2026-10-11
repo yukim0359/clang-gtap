@@ -161,6 +161,13 @@ public:
 private:
   // Get the AST context.
   ASTContext &getASTContext();
+
+  /// Diagnose unless exactly one execution-mode macro is defined.
+  /// Later calls report the same result without a second diagnostic.
+  bool checkExecutionMode(SourceLocation Loc);
+
+  bool ExecutionModeChecked = false;
+  bool ExecutionModeValid = false;
   
   /// Flag indicating if we are currently inside a GTaP entry directive.
   bool InGTaPEntryDirective = false;

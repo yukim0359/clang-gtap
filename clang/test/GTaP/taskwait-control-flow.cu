@@ -2,6 +2,7 @@
 // RUN:   -std=c++17 -fsyntax-only %s
 
 #define __device__ __attribute__((device))
+#define __GTAP_IS_THREAD_MODE 1
 
 namespace gtap::detail::thread {
 struct TaskContext {};

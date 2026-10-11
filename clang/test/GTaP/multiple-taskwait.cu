@@ -7,6 +7,7 @@
 // CHECK-COUNT-2: DeclRefExpr {{.*}} Function {{.*}} '__gtap_prepare_for_join'
 
 #define __device__ __attribute__((device))
+#define __GTAP_IS_THREAD_MODE 1
 
 namespace gtap::detail::thread {
 struct TaskContext {};

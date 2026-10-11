@@ -3,6 +3,7 @@
 
 #define __device__ __attribute__((device))
 #define __global__ __attribute__((global))
+#define __GTAP_IS_THREAD_MODE 1
 
 namespace gtap::detail::thread {
 struct TaskContext {};
