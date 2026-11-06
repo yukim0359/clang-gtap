@@ -29,7 +29,7 @@ This compiler extends Clang so you can write GPU kernels using `#pragma gtap` di
 - C/C++ toolchain (Clang or GCC)
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
 
-We have verified build and basic functionality on a single GH200 node of the [Miyabi-G](https://www.cc.u-tokyo.ac.jp/en/supercomputer/miyabi/service/) supercomputer (1× NVIDIA GH200; Clang 21.1.8, CUDA Toolkit 12.9, Linux kernel `5.14.0-427.13.1.el9_4.aarch64`).
+We have verified build and basic functionality on a single GH200 node of the [Miyabi-G](https://www.cc.u-tokyo.ac.jp/en/supercomputer/miyabi/service/) supercomputer (1× NVIDIA GH200; Clang 21.1.8, CUDA Toolkit 12.9, Linux kernel `5.14.0-687.26.1.el9_8.aarch64+64k`).
 
 ## Building
 
